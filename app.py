@@ -400,9 +400,6 @@ def init_session_state():
         'library_sort_by': 'date_desc',
         'library_search_query': '',
         'library_filter_type': 'all',
-        'selected_images': [],  # Legacy support
-        'show_image_modal': False,
-        'modal_image_data': None,
         'selected_slideshow_images': [],  # Images selected from slideshow for generation
         'selected_library_images': [],  # Images selected from library for batch operations
         'image_preview_cache': {},  # Cache normalized image data
@@ -933,7 +930,7 @@ def display_image_grid(images, columns=3, show_metadata=True, show_actions=True)
                                 created_dt_str = created_dt_str[:-1] + '+00:00'
                             created_date = datetime.fromisoformat(created_dt_str)
                             date_str = created_date.strftime('%m/%d %H:%M')
-                            metadata_badges.append(f"<span style='background:#6c757d;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>{date_str}</span>")
+                            metadata_badges.append("<span style='background:#6c757d;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>{}</span>".format(date_str))
                         except ValueError:
                             pass
                     
@@ -946,7 +943,7 @@ def display_image_grid(images, columns=3, show_metadata=True, show_actions=True)
                                 size_str = f"{size_bytes / 1024:.0f}KB"
                             else:
                                 size_str = f"{size_bytes}B"
-                            metadata_badges.append(f"<span style='background:#6c757d;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>{size_str}</span>")
+                            metadata_badges.append("<span style='background:#6c757d;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>{}</span>".format(size_str))
                         except (ValueError, TypeError):
                             pass
 
@@ -1442,26 +1439,54 @@ def authenticate_with_service_account(service_account_json: dict):
         )
         service = build("drive", "v3", credentials=credentials)
         
-        # Test connection by trying to list files in the app's folder (or root if not found)
-        try:
-            app_folder_id = create_app_folder() # This will create if it doesn't exist
-            service.files().list(q=f"'{app_folder_id}' in parents", pageSize=1, fields="nextPageToken, files(id, name)").execute()
-        except Exception as test_e:
-            print(f"[v0] Drive authentication test failed: {str(test_e)}")
-            return False, "Authentication successful, but could not access Drive. Check folder permissions."
-
         st.session_state.credentials = credentials
         st.session_state.service = service
         st.session_state.authenticated = True
-        return True, "Successfully authenticated with Google Drive."
+        
+        try:
+            # Test basic Drive access first
+            test_response = service.files().list(pageSize=1, fields="files(id, name)").execute()
+            print(f"[v0] Basic Drive access successful: {len(test_response.get('files', []))} files found")
+            
+            # Now try to create/find the app folder
+            app_folder_id = create_app_folder()
+            if app_folder_id:
+                print(f"[v0] App folder created/found: {app_folder_id}")
+            else:
+                print(f"[v0] Warning: Could not create app folder, but Drive access works")
+                
+        except Exception as test_e:
+            error_msg = str(test_e)
+            print(f"[v0] Drive access test warning: {error_msg}")
+            
+            if "insufficient" in error_msg.lower() or "permission" in error_msg.lower():
+                # Permission error - auth worked but limited access
+                st.warning("⚠️ Drive connected but with limited permissions. You can still use public folders.")
+                return True, "Connected with limited permissions. Public folders will work."
+            elif "quota" in error_msg.lower():
+                st.warning("⚠️ Drive quota exceeded. Using public folders only.")
+                return True, "Connected but quota exceeded. Using public folders."
+            else:
+                # Unknown error - still allow connection for public folder access
+                st.warning(f"⚠️ Drive connected but folder creation failed: {error_msg}")
+                return True, "Drive connected. Using public folders for now."
+
+        return True, "Successfully authenticated with Google Drive!"
         
     except Exception as e:
-        print(f"[v0] Service account authentication failed: {str(e)}")
-        return False, f"Authentication failed: {str(e)}"
+        error_msg = str(e)
+        print(f"[v0] Service account authentication failed: {error_msg}")
+        
+        st.session_state.authenticated = False
+        st.session_state.service = None
+        st.session_state.credentials = None
+        
+        return False, f"Authentication failed: {error_msg}"
 
 def create_app_folder():
     """Creates a folder for the app in Google Drive if it doesn't exist."""
-    if not st.session_state.service:
+    if not st.session_state.get('service'):
+        print("[v0] No Drive service available for folder creation")
         return None
     
     folder_name = "AI_Slideshow_Generator"
@@ -1469,50 +1494,70 @@ def create_app_folder():
     try:
         # Check if folder already exists
         query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        response = st.session_state.service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
+        response = st.session_state.service.files().list(
+            q=query, 
+            spaces="drive", 
+            fields="files(id, name)",
+            pageSize=10
+        ).execute()
         
         if response.get("files"):
             folder_id = response["files"][0]["id"]
-            print(f"[v0] App folder '{folder_name}' already exists with ID: {folder_id}")
+            print(f"[v0] App folder '{folder_name}' found with ID: {folder_id}")
         else:
-            # Create folder if it doesn't exist
             file_metadata = {
                 "name": folder_name,
                 "mimeType": "application/vnd.google-apps.folder",
             }
-            folder = st.session_state.service.files().create(body=file_metadata, fields="id").execute()
-            folder_id = folder.get("id")
-            print(f"[v0] Created app folder '{folder_name}' with ID: {folder_id}")
             
-            # Make the folder publicly accessible (optional, but good for collaboration if needed)
             try:
-                st.session_state.service.permissions().create(
-                    fileId=folder_id,
-                    body={'type': 'anyone', 'role': 'reader'},
-                    fields='id'
+                folder = st.session_state.service.files().create(
+                    body=file_metadata, 
+                    fields="id"
                 ).execute()
-                print(f"[v0] Made folder '{folder_name}' public.")
-            except Exception as perm_e:
-                print(f"[v0] Failed to make folder public: {str(perm_e)}")
+                folder_id = folder.get("id")
+                print(f"[v0] Created app folder '{folder_name}' with ID: {folder_id}")
+                
+                try:
+                    st.session_state.service.permissions().create(
+                        fileId=folder_id,
+                        body={'type': 'anyone', 'role': 'reader'},
+                        fields='id'
+                    ).execute()
+                    print(f"[v0] Made folder '{folder_name}' public")
+                except Exception as perm_e:
+                    print(f"[v0] Could not make folder public (OK): {str(perm_e)}")
+                    
+            except Exception as create_e:
+                error_msg = str(create_e)
+                print(f"[v0] Could not create folder: {error_msg}")
+                
+                if "insufficient" in error_msg.lower() or "permission" in error_msg.lower():
+                    print(f"[v0] Insufficient permissions to create folder - will use public folders only")
+                    return None
+                raise  # Re-raise other errors
 
         st.session_state.gdrive_folder_id = folder_id
         return folder_id
         
     except Exception as e:
-        print(f"[v0] Error creating/finding app folder: {str(e)}")
+        error_msg = str(e)
+        print(f"[v0] Error with app folder: {error_msg}")
+        
+        st.session_state.gdrive_folder_id = None
         return None
 
 def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
     """Upload a file to Google Drive from a URL or local path."""
-    if not st.session_state.service:
-        st.error("Not authenticated with Google Drive.")
+    if not st.session_state.get('service'):
+        st.error("❌ Not authenticated with Google Drive. Please connect in Settings.")
         return None
     
     if parent_folder_id is None:
-        parent_folder_id = st.session_state.gdrive_folder_id
+        parent_folder_id = st.session_state.get('gdrive_folder_id')
     
     if not parent_folder_id:
-        st.error("Google Drive folder not set up. Please authenticate.")
+        st.warning("⚠️ No Drive folder available. Ensure Drive is properly set up in Settings.")
         return None
     
     print(f"[v0] Uploading '{filename}' to Drive folder '{parent_folder_id}'...")
@@ -1535,7 +1580,7 @@ def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
             elif filename.lower().endswith(".webp"):
                 mime_type = "image/webp"
             else:
-                mime_type = "application/octet-stream" # Default fallback
+                mime_type = "application/octet-stream"
 
         file_metadata = {
             "name": filename,
@@ -1545,7 +1590,7 @@ def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
         media = MediaIoBaseUpload(file_content, mimetype=mime_type, resumable=True)
         
         file = st.session_state.service.files().create(
-            body=file_metadata, media_body=media, fields="id, webViewLink"
+            body=file_metadata, media_body=media, fields="id, webViewLink, webContentLink"
         ).execute()
         
         print(f"[v0] Successfully uploaded '{filename}'. File ID: {file.get('id')}")
@@ -1559,7 +1604,7 @@ def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
             ).execute()
             print(f"[v0] Made uploaded file '{filename}' public.")
         except Exception as perm_e:
-            print(f"[v0] Failed to make uploaded file public: {str(perm_e)}")
+            print(f"[v0] Failed to make uploaded file public (OK): {str(perm_e)}")
             
         st.session_state.stats['uploaded_images'] += 1
         return file.get("webViewLink")
@@ -1568,40 +1613,49 @@ def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
         st.error("Timeout downloading image for upload.")
         return None
     except Exception as e:
-        print(f"[v0] Error uploading file: {str(e)}")
-        st.error(f"Error uploading '{filename}' to Google Drive: {str(e)}")
+        error_msg = str(e)
+        print(f"[v0] Error uploading file: {error_msg}")
+        st.error(f"Error uploading '{filename}' to Google Drive: {error_msg}")
         return None
 
 def list_gdrive_images(folder_id=None, fetch_all=False):
     """List images from a specific folder or the entire Drive if fetch_all=True."""
-    if not st.session_state.service:
+    if not st.session_state.get('service'):
+        print("[v0] No Drive service available for listing images")
         return []
 
     if folder_id is None:
-        folder_id = st.session_state.gdrive_folder_id
+        folder_id = st.session_state.get('gdrive_folder_id')
     
     if not folder_id:
+        print("[v0] No folder ID available for listing images")
         return []
 
     images = []
     try:
         query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed=false"
-        if not fetch_all:
-            query += " and name contains 'AI_Slideshow_Generator_'" # Filter specifically generated images if not fetching all
-
+        
         page_token = None
+        pages_fetched = 0
+        max_pages = 10  # Limit pages to prevent infinite loops
+        
         while True:
+            if pages_fetched >= max_pages:
+                print(f"[v0] Reached max pages limit ({max_pages}), stopping pagination")
+                break
+                
             response = st.session_state.service.files().list(
                 q=query,
                 spaces="drive",
                 fields="nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, webViewLink, thumbnailLink, webContentLink)",
+                pageSize=100,  # Fetch 100 per page for efficiency
                 pageToken=page_token
             ).execute()
             
             for file in response.get("files", []):
                 image_data = {
                     "id": file["id"],
-                    "file_id": file["id"], # Alias for consistency
+                    "file_id": file["id"],
                     "name": file.get("name", "Unknown"),
                     "mimeType": file.get("mimeType", ""),
                     "size": file.get("size", 0),
@@ -1611,24 +1665,34 @@ def list_gdrive_images(folder_id=None, fetch_all=False):
                     "thumbnailLink": file.get("thumbnailLink", ""),
                     "webContentLink": file.get("webContentLink", ""),
                     "source": "gdrive_storage",
-                    "folder_id": folder_id, # Store the folder_id for reference
-                    "url": file.get("webContentLink", ""), # Use webContentLink as primary
+                    "folder_id": folder_id,
+                    "folder_name": "Drive Storage",
+                    "url": file.get("webContentLink", ""),
                     "original_url": file.get("webContentLink", ""),
-                    "original_generation_url": file.get("webContentLink", ""), # For consistency with generation results
+                    "original_generation_url": file.get("webContentLink", ""),
                 }
                 # Normalize the image data for display and compatibility
                 image_data = normalize_image_urls(image_data)
                 images.append(image_data)
             
             page_token = response.get("nextPageToken", None)
+            pages_fetched += 1
+            
             if page_token is None:
                 break
                 
-        print(f"[v0] Listed {len(images)} images from Drive folder '{folder_id}'")
+        print(f"[v0] Listed {len(images)} images from Drive folder '{folder_id}' ({pages_fetched} pages)")
         return images
         
     except Exception as e:
-        print(f"[v0] Error listing Drive files: {str(e)}")
+        error_msg = str(e)
+        print(f"[v0] Error listing Drive files: {error_msg}")
+        
+        if "insufficient" in error_msg.lower() or "permission" in error_msg.lower():
+            st.warning("⚠️ Limited Drive permissions. Cannot access stored images.")
+        elif "quota" in error_msg.lower():
+            st.warning("⚠️ Drive quota exceeded.")
+        
         return []
 
 # ============================================================================
@@ -1641,7 +1705,7 @@ def render_slideshow_page():
     
     if st.session_state.selected_slideshow_images:
         with st.container():
-            st.markdown(f"""
+            st.markdown("""
             <div style='background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                         color:white;padding:16px;border-radius:12px;margin-bottom:20px;
                         box-shadow:0 4px 6px rgba(0,0,0,0.1);'>
@@ -1653,7 +1717,7 @@ def render_slideshow_page():
                     <div style='font-size:32px;'>🎨</div>
                 </div>
             </div>
-            """, unsafe_allow_html=True)
+            """.format(len(st.session_state.selected_slideshow_images)), unsafe_allow_html=True)
             
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
@@ -1771,25 +1835,25 @@ def render_slideshow_page():
     total = len(imgs)
     idx = st.session_state.current_index
     
-    st.markdown(f"""
+    st.markdown("""
     <div class="stats-container">
         <div class="stat-box">
-            <h2>{idx + 1}/{total}</h2>
+            <h2>{idx+1}/{total}</h2>
             <p>Current Slide</p>
         </div>
         <div class="stat-box">
-            <h2>{round((idx + 1) / total * 100)}%</h2>
+            <h2>{progress:.0f}%</h2>
             <p>Progress</p>
         </div>
         <div class="stat-box">
-            <h2>{len(st.session_state.selected_slideshow_images)}</h2>
+            <h2>{selected_count}</h2>
             <p>Selected</p>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """.format(idx=idx, total=total, progress=((idx + 1) / total * 100) if total > 0 else 0, selected_count=len(st.session_state.selected_slideshow_images)), unsafe_allow_html=True)
     
     # Progress bar
-    progress_percentage = ((idx + 1) / total) * 100
+    progress_percentage = ((idx + 1) / total) * 100 if total > 0 else 0
     st.markdown(f"""
     <div class="progress-container">
         <div class="progress-bar" style="width: {progress_percentage}%"></div>
@@ -1805,12 +1869,12 @@ def render_slideshow_page():
     display_image_with_fallback(current_item, caption="", show_source=False)
     st.markdown('</div>', unsafe_allow_html=True)
     
-    st.markdown(f"""
+    st.markdown("""
     <div class="image-caption">
-        <span class="slide-counter">{idx + 1} / {total}</span>
-        <span>{current_item.get("name", "Unknown")}</span>
+        <span class="slide-counter">{idx+1} / {total}</span>
+        <span>{name}</span>
     </div>
-    """, unsafe_allow_html=True)
+    """.format(idx=idx, total=total, name=current_item.get("name", "Unknown")), unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1908,7 +1972,7 @@ def render_slideshow_page():
         jump_to = st.selectbox(
             "Jump to slide:",
             range(1, total + 1),
-            index=idx
+            index=idx if total > 0 else 0 # Ensure index is valid if total is 0
         )
         if jump_to != idx + 1:
             st.session_state.current_index = jump_to - 1
@@ -1917,27 +1981,28 @@ def render_slideshow_page():
     # Autoplay logic
     if st.session_state.autoplay:
         time.sleep(slideshow_speed)
-        if idx == total - 1 and st.session_state.loop_mode:
-            st.session_state.current_index = 0
-        elif idx < total - 1:
-            st.session_state.current_index = idx + 1
-        else:
-            st.session_state.autoplay = False
-        st.rerun()
+        if total > 0: # Only advance if there are images
+            if idx == total - 1 and st.session_state.loop_mode:
+                st.session_state.current_index = 0
+            elif idx < total - 1:
+                st.session_state.current_index = idx + 1
+            else: # If loop mode is off and we are at the end
+                st.session_state.autoplay = False
+            st.rerun()
 
 
 def display_generate_page():
     st.title("🎨 Generate New Images")
     
     if st.session_state.selected_slideshow_images:
-        st.markdown(f"""
+        st.markdown("""
         <div style='background:linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
                     color:white;padding:16px;border-radius:12px;margin-bottom:20px;
                     box-shadow:0 4px 6px rgba(0,0,0,0.1);'>
-            <h3 style='margin:0;'>✓ {len(st.session_state.selected_slideshow_images)} Images Ready for Generation</h3>
+            <h3 style='margin:0;'>✓ {count} Images Ready for Generation</h3>
             <p style='margin:4px 0 0 0;opacity:0.9;'>These images will be used as reference or edit source</p>
         </div>
-        """, unsafe_allow_html=True)
+        """.format(count=len(st.session_state.selected_slideshow_images)), unsafe_allow_html=True)
         
         with st.expander("📸 View All Selected Images", expanded=False):
             cols = st.columns(min(5, len(st.session_state.selected_slideshow_images)))
@@ -2036,7 +2101,7 @@ def display_generate_page():
             default_qwen_url = get_best_streamlit_url(selected_image_data) or default_qwen_url
             
         with st.form("qwen_image_edit_form"):
-            prompt = st.text_area("Edit Prompt", "Make the image more vibrant and colorful, add a subtle glow")
+            prompt = st.text_area("Prompt", "Make the image more vibrant and colorful, add a subtle glow")
             negative_prompt = st.text_area("Negative Prompt (Optional)", "blurry, ugly, low quality, distorted")
             
             if st.session_state.selected_slideshow_images:
@@ -2139,7 +2204,7 @@ def display_generate_page():
             default_seedream_url = get_best_streamlit_url(selected_image_data) or default_seedream_url
             
         with st.form("seedream_image_edit_form"):
-            prompt = st.text_area("Edit Prompt", "Transform the image with dramatic lighting and enhanced details")
+            prompt = st.text_area("Prompt", "Transform the image with dramatic lighting and enhanced details")
             negative_prompt = st.text_area("Negative Prompt (Optional)", "blurry, distorted, low quality")
             
             if st.session_state.selected_slideshow_images:
@@ -2337,7 +2402,7 @@ def display_history_page():
                                     file_name = f"{task['model'].replace('/', '_')}_{task_id}_{res_idx+1}.{file_extension}"
                                     
                                     with st.spinner(f"Uploading '{file_name}'..."):
-                                        upload_info = upload_to_gdrive(result_url, file_name, task_id)
+                                        upload_info = upload_to_drive(result_url, file_name, task_id)
                                         if upload_info:
                                             st.session_state.library_images.insert(0, upload_info)
                                             st.success(f"Uploaded '{file_name}' to Drive!")
@@ -2521,16 +2586,16 @@ def display_library_page():
             folder_size_mb = folder_size / (1024*1024) if folder_size > 0 else 0
             
             with st.expander(f"📁 **{folder_name}** ({len(folder_images)} images, {folder_size_mb:.1f} MB)", expanded=True):
-                st.markdown(f"""
+                st.markdown("""
                     <div style='background:#e3f2fd;padding:12px;border-radius:8px;margin-bottom:16px;'>
                         <div style='font-size:13px;color:#1565c0;'>
                             <strong>Folder:</strong> {folder_name}<br>
-                            <strong>Images:</strong> {len(folder_images)}<br>
-                            <strong>Total Size:</strong> {folder_size_mb:.2f} MB<br>
-                            <strong>Source:</strong> {'Google Drive Storage' if folder_images[0].get('folder_id') == st.session_state.gdrive_folder_id else 'Public Folder'}
+                            <strong>Images:</strong> {num_images}<br>
+                            <strong>Total Size:</strong> {size_mb:.2f} MB<br>
+                            <strong>Source:</strong> {source}
                         </div>
                     </div>
-                """, unsafe_allow_html=True)
+                """.format(folder_name=folder_name, num_images=len(folder_images), size_mb=folder_size_mb, source='Google Drive Storage' if folder_images and folder_images[0].get('folder_id') == st.session_state.gdrive_folder_id else 'Public Folder'), unsafe_allow_html=True)
                 
                 display_image_grid(folder_images, columns=3, show_metadata=True, show_actions=True)
     
@@ -2538,7 +2603,7 @@ def display_library_page():
         # List view with detailed URLs
         for idx, image_data in enumerate(filtered_images):
             with st.container():
-                st.markdown(f"---")
+                st.markdown("---")
                 
                 col_img, col_info = st.columns([1, 2])
                 
