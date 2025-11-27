@@ -8,6 +8,8 @@ import io
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from pathlib import Path
+import base64
+from PIL import Image as PILImage
 
 try:
     from PIL import Image as PILImage
@@ -345,7 +347,7 @@ init_session_state()
 # ============================================================================
 def extract_folder_id(url: str):
     """Extract folder ID from various Google Drive URL formats"""
-    console.log("[v0] Extracting folder ID from:", url)
+    print(f"[v0] Extracting folder ID from: {url}")
     patterns = [
         r'/folders/([a-zA-Z0-9_-]+)',
         r'id=([a-zA-Z0-9_-]+)',
@@ -355,7 +357,7 @@ def extract_folder_id(url: str):
         m = re.search(p, url)
         if m:
             folder_id = m.group(1)
-            console.log("[v0] Found folder ID:", folder_id)
+            print(f"[v0] Found folder ID: {folder_id}")
             return folder_id
     raise ValueError("Invalid Google Drive folder link.")
 
@@ -364,7 +366,7 @@ def get_gdrive_image_urls(folder_id: str):
     Extract individual image URLs from a public Google Drive folder.
     Uses multiple methods to reliably fetch images from public folders.
     """
-    console.log("[v0] Fetching images from folder ID:", folder_id)
+    print(f"[v0] Fetching images from folder ID: {folder_id}")
     images = []
     
     try:
@@ -374,14 +376,14 @@ def get_gdrive_image_urls(folder_id: str):
         }
         
         response = requests.get(folder_url, headers=headers, timeout=15)
-        console.log("[v0] Drive API response status:", response.status_code)
+        print(f"[v0] Drive API response status: {response.status_code}")
         
         if response.status_code == 200:
             html_content = response.text
             
             # Method 1: Extract all 33-character file IDs
             all_file_ids = re.findall(r'"([a-zA-Z0-9_-]{33})"', html_content)
-            console.log("[v0] Found", len(all_file_ids), "potential file IDs (33 chars)")
+            print(f"[v0] Found {len(all_file_ids)} potential file IDs (33 chars)")
             
             seen = set()
             for file_id in all_file_ids:
@@ -403,7 +405,7 @@ def get_gdrive_image_urls(folder_id: str):
             # Method 2: 28-character file IDs
             if len(images) < 50:
                 alt_file_ids = re.findall(r'"([a-zA-Z0-9_-]{28})"', html_content)
-                console.log("[v0] Found", len(alt_file_ids), "additional file IDs (28 chars)")
+                print(f"[v0] Found {len(alt_file_ids)} additional file IDs (28 chars)")
                 for file_id in alt_file_ids:
                     if file_id != folder_id and file_id not in seen and len(file_id) == 28:
                         seen.add(file_id)
@@ -424,7 +426,7 @@ def get_gdrive_image_urls(folder_id: str):
             if len(images) < 50:
                 json_pattern = r'\["([a-zA-Z0-9_-]{25,})"'
                 json_ids = re.findall(json_pattern, html_content)
-                console.log("[v0] Found", len(json_ids), "file IDs from JSON (25+ chars)")
+                print(f"[v0] Found {len(json_ids)} file IDs from JSON (25+ chars)")
                 for file_id in json_ids:
                     if file_id != folder_id and file_id not in seen and len(file_id) >= 25:
                         seen.add(file_id)
@@ -441,7 +443,7 @@ def get_gdrive_image_urls(folder_id: str):
                             "original_generation_url": image_url
                         })
         
-        console.log("[v0] Total images found:", len(images))
+        print(f"[v0] Total images found: {len(images)}")
         if images:
             st.success(f"Found {len(images)} images in Google Drive folder")
             with st.expander("View All Image URLs", expanded=False):
@@ -457,7 +459,7 @@ def get_gdrive_image_urls(folder_id: str):
         return []
         
     except Exception as e:
-        console.log("[v0] Error loading from Drive:", str(e))
+        print(f"[v0] Error loading from Drive: {str(e)}")
         st.error(f"Error loading from Google Drive: {str(e)}")
         return []
 
@@ -816,7 +818,7 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
         urls_to_try.append(('Original Quality', image_data['original_generation_url'], '#FF6B6B'))
     elif image_data.get('original_url'):
         urls_to_try.append(('Original', image_data['original_url'], '#FF6B6B'))
-    elif image_data.get('url'):  # From slideshow images
+    elif image_data.get('url'):
         urls_to_try.append(('Drive URL', image_data['url'], '#4285F4'))
     
     if image_data.get('drive_public_url'):
@@ -836,7 +838,7 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
     
     if not urls_to_try:
         st.error("No valid image URLs found in the provided data.")
-        console.log("[v0] No URLs found in image_data:", list(image_data.keys()))
+        print(f"[v0] No URLs found in image_data: {list(image_data.keys())}")
         return False
     
     displayed = False
@@ -844,7 +846,7 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
     
     for source_label, url, badge_color in urls_to_try:
         try:
-            console.log(f"[v0] Trying {source_label}: {url[:100]}")
+            print(f"[v0] Trying {source_label}: {url[:100]}")
             if width:
                 st.image(url, caption=caption, width=width)
             else:
@@ -852,11 +854,11 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
             
             displayed = True
             used_source_info = (source_label, badge_color)
-            console.log(f"[v0] Successfully displayed from {source_label}")
+            print(f"[v0] Successfully displayed from {source_label}")
             break
             
         except Exception as e:
-            console.log(f"[v0] Failed {source_label}: {str(e)[:100]}")
+            print(f"[v0] Failed {source_label}: {str(e)[:100]}")
             continue
     
     if displayed and show_source and used_source_info:
@@ -870,7 +872,7 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
         return True
     
     if not displayed:
-        console.log("[v0] All URLs failed, showing placeholder")
+        print("[v0] All URLs failed, showing placeholder")
         st.markdown(
             f"<div style='padding:40px;background:#f8f9fa;border:2px dashed #dee2e6;border-radius:12px;text-align:center;color:#6c757d;'>"
             f"<div style='font-size:48px;margin-bottom:10px;'>🖼️</div>"
