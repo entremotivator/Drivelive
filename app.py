@@ -1,32 +1,33 @@
 import streamlit as st
+import requests
 import re
 import time
-import os
-import requests
-import json
+import random
 import io
+from PIL import Image
+import json
 from datetime import datetime
-from typing import Optional, Dict, List, Any
-from pathlib import Path
+from typing import Dict, List, Optional, Any
 import base64
-from PIL import Image as PILImage
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
-try:
-    from PIL import Image as PILImage
-except Exception:
-    PILImage = None
-    st.error("Pillow is missing. Add 'Pillow' to requirements.txt")
+# ============================================================================
+# Configuration and Constants
+# ============================================================================
 
-try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseUpload
-except Exception:
-    service_account = None
-    build = None
-    MediaIoBaseUpload = None
-    st.error("Google API packages missing. Add these to requirements.txt: "
-             "google-auth, google-auth-oauthlib, google-auth-httplib2, google-api-python-client")
+DEFAULT_FOLDERS = {
+    "Folder 1": "https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link",
+    "Folder 2": "https://drive.google.com/drive/folders/1fbHjKWNRleTk2giAQiCGR9s8V0VE14IO?usp=share_link",
+    "Folder 3": "https://drive.google.com/drive/folders/10e7Swca0GHr6bIQ6_M6JRs4WBqZ4K7iJ?usp=share_link"
+}
+
+DEFAULT_FOLDER_URL = "https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link"
+
+# API Configuration
+API_BASE_URL = "https://zyloai.xyz"
+API_HEADERS = {"Content-Type": "application/json"}
 
 # ============================================================================
 # Page Configuration
@@ -287,8 +288,9 @@ st.markdown("""
 # ============================================================================
 # Configuration
 # ============================================================================
-DEFAULT_FOLDER_URL = 'https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link'
-BASE_URL = "https://api.kie.ai/api/v1/jobs"
+# Moved DEFAULT_FOLDER_URL and DEFAULT_FOLDERS to Configuration section
+# DEFAULT_FOLDER_URL = 'https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link'
+# BASE_URL = "https://api.kie.ai/api/v1/jobs" # Removed, replaced by API_BASE_URL
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 # ============================================================================
@@ -333,7 +335,10 @@ def init_session_state():
         'selected_images': [],
         'show_image_modal': False,
         'modal_image_data': None,
-        'selected_slideshow_images': []
+        'selected_slideshow_images': [],
+        'saved_folders': DEFAULT_FOLDERS.copy(),
+        'editing_folder': None,
+        'show_folder_manager': False
     }
     
     for key, value in defaults.items():
@@ -684,7 +689,7 @@ def create_task(api_key, model, input_params, callback_url=None):
     
     try:
         response = requests.post(
-            f"{BASE_URL}/createTask",
+            f"{API_BASE_URL}/createTask", # Changed from BASE_URL
             headers=headers,
             json=payload,
             timeout=30
@@ -714,7 +719,7 @@ def check_task_status(api_key, task_id):
     
     try:
         response = requests.get(
-            f"{BASE_URL}/recordInfo",
+            f"{API_BASE_URL}/recordInfo", # Changed from BASE_URL
             headers=headers,
             params={"taskId": task_id},
             timeout=30
@@ -1009,6 +1014,126 @@ def handle_service_account_upload():
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
 
+def save_folder_config(folder_name: str, folder_url: str):
+    """Save a folder configuration."""
+    st.session_state.saved_folders[folder_name] = folder_url
+    st.success(f"Saved folder: {folder_name}")
+
+def delete_folder_config(folder_name: str):
+    """Delete a folder configuration."""
+    if folder_name in st.session_state.saved_folders:
+        del st.session_state.saved_folders[folder_name]
+        st.success(f"Deleted folder: {folder_name}")
+
+def rename_folder_config(old_name: str, new_name: str):
+    """Rename a folder configuration."""
+    if old_name in st.session_state.saved_folders:
+        folder_url = st.session_state.saved_folders[old_name]
+        del st.session_state.saved_folders[old_name]
+        st.session_state.saved_folders[new_name] = folder_url
+        st.success(f"Renamed folder: {old_name} → {new_name}")
+
+def render_folder_manager():
+    """Render the folder management interface."""
+    st.markdown("### Folder Management")
+    
+    # Add new folder section
+    with st.expander("Add New Folder", expanded=False):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            new_folder_name = st.text_input(
+                "Folder Name",
+                key="new_folder_name",
+                placeholder="My Custom Folder"
+            )
+            new_folder_url = st.text_input(
+                "Folder URL",
+                key="new_folder_url",
+                placeholder="https://drive.google.com/drive/folders/..."
+            )
+        with col2:
+            st.markdown("<div style='height: 48px;'></div>", unsafe_allow_html=True)
+            if st.button("Add Folder", type="primary", use_container_width=True):
+                if new_folder_name and new_folder_url:
+                    try:
+                        # Validate URL
+                        extract_folder_id(new_folder_url)
+                        save_folder_config(new_folder_name, new_folder_url)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Invalid folder URL: {str(e)}")
+                else:
+                    st.warning("Please provide both folder name and URL")
+    
+    # Display existing folders
+    st.markdown("### Saved Folders")
+    
+    if not st.session_state.saved_folders:
+        st.info("No saved folders. Add one above to get started!")
+        return
+    
+    for idx, (folder_name, folder_url) in enumerate(st.session_state.saved_folders.items()):
+        with st.container():
+            col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
+            
+            with col1:
+                # Show folder name with edit capability
+                if st.session_state.editing_folder == folder_name:
+                    new_name = st.text_input(
+                        "New name",
+                        value=folder_name,
+                        key=f"rename_{idx}",
+                        label_visibility="collapsed"
+                    )
+                else:
+                    st.markdown(f"**{folder_name}**")
+            
+            with col2:
+                # Show truncated URL
+                truncated_url = folder_url[:40] + "..." if len(folder_url) > 40 else folder_url
+                st.caption(truncated_url)
+            
+            with col3:
+                # Load button
+                if st.button("Load", key=f"load_{idx}", use_container_width=True):
+                    with st.spinner("Loading images..."):
+                        try:
+                            folder_id = extract_folder_id(folder_url)
+                            gdrive_imgs = get_public_drive_images(folder_id)
+                            st.session_state.images = gdrive_imgs
+                            st.session_state.current_index = 0
+                            st.session_state.default_folder_url = folder_url
+                            st.session_state.show_folder_manager = False
+                            if gdrive_imgs:
+                                st.balloons()
+                                st.success(f"Loaded {len(gdrive_imgs)} images!")
+                                st.rerun()
+                            else:
+                                st.error("No images found.")
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+            
+            with col4:
+                # Edit button
+                if st.session_state.editing_folder == folder_name:
+                    if st.button("Save", key=f"save_{idx}", use_container_width=True):
+                        if new_name and new_name != folder_name:
+                            rename_folder_config(folder_name, new_name)
+                            st.session_state.editing_folder = None
+                            st.rerun()
+                else:
+                    if st.button("Edit", key=f"edit_{idx}", use_container_width=True):
+                        st.session_state.editing_folder = folder_name
+                        st.rerun()
+            
+            with col5:
+                # Delete button
+                if st.button("Delete", key=f"delete_{idx}", use_container_width=True):
+                    delete_folder_config(folder_name)
+                    st.rerun()
+            
+            st.divider()
+
 with st.sidebar:
     st.markdown("# 🎬 Drive Slideshow & AI")
     st.markdown("---")
@@ -1107,34 +1232,60 @@ with st.sidebar:
 # Main Application Pages
 # ============================================================================
 
-def display_slideshow_page():
-    st.markdown("""
-    <div class="main-header">
-        <h1>🎬 Drive Slideshow Gallery</h1>
-        <p>View and select images from Google Drive folders</p>
-    </div>
-    """, unsafe_allow_html=True)
+# Renamed from display_slideshow_page to render_slideshow_page for consistency
+def render_slideshow_page():
+    """Render the main slideshow interface."""
+    # st.title("Google Drive Image Slideshow with AI Generation") # Removed, replaced by main-header
     
-    # Load images section
-    st.markdown("## Load Images from Google Drive")
+    st.markdown("## Select or Manage Folders")
     
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
     with col1:
-        folder_url = st.text_input(
-            "Google Drive Folder URL/ID",
-            value=st.session_state.default_folder_url,
+        # Quick folder selector
+        folder_options = list(st.session_state.saved_folders.keys())
+        if folder_options:
+            selected_folder = st.selectbox(
+                "Quick Select Folder",
+                options=folder_options,
+                help="Select from your saved folders"
+            )
+            selected_folder_url = st.session_state.saved_folders[selected_folder]
+        else:
+            selected_folder_url = DEFAULT_FOLDER_URL
+    
+    with col2:
+        # Custom URL input
+        custom_folder_url = st.text_input(
+            "Or Enter Custom URL",
+            value=selected_folder_url if 'selected_folder' in locals() else DEFAULT_FOLDER_URL,
             placeholder="Paste your public folder link here...",
             help="Folder must have 'Anyone with the link can view' permission"
         )
-    with col2:
+    
+    with col3:
         st.markdown("<div style='height: 30px;'></div>", unsafe_allow_html=True)
+        if st.button("Manage Folders", use_container_width=True):
+            st.session_state.show_folder_manager = not st.session_state.show_folder_manager
+            st.rerun()
+    
+    if st.session_state.show_folder_manager:
+        render_folder_manager()
+        st.divider()
+    
+    # Load button
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown("### Load Images")
+    with col2:
         if st.button("Load Gallery", type="primary", use_container_width=True):
             with st.spinner("Loading images..."):
                 try:
-                    folder_id = extract_folder_id(folder_url)
+                    folder_id = extract_folder_id(custom_folder_url)
                     gdrive_imgs = get_public_drive_images(folder_id)
                     st.session_state.images = gdrive_imgs
                     st.session_state.current_index = 0
+                    st.session_state.default_folder_url = custom_folder_url
                     if gdrive_imgs:
                         st.balloons()
                         st.success(f"Loaded {len(gdrive_imgs)} images!")
@@ -1144,9 +1295,32 @@ def display_slideshow_page():
                     st.error(f"Error loading Google Drive: {str(e)}")
     
     if not st.session_state.images:
-        st.info("Click 'Load Gallery' to start viewing images from the Drive folder")
+        st.info("Select a folder and click 'Load Gallery' to start viewing images")
+        
+        # Show preview of saved folders
+        if st.session_state.saved_folders:
+            st.markdown("### Your Saved Folders")
+            for folder_name, folder_url in list(st.session_state.saved_folders.items())[:3]:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{folder_name}**")
+                    st.caption(folder_url[:60] + "..." if len(folder_url) > 60 else folder_url)
+                with col2:
+                    if st.button("Load", key=f"quick_load_{folder_name}", use_container_width=True):
+                        with st.spinner("Loading..."):
+                            try:
+                                folder_id = extract_folder_id(folder_url)
+                                gdrive_imgs = get_public_drive_images(folder_id)
+                                st.session_state.images = gdrive_imgs
+                                st.session_state.current_index = 0
+                                st.session_state.default_folder_url = folder_url
+                                if gdrive_imgs:
+                                    st.balloons()
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
         return
-    
+
     # Slideshow controls
     imgs = st.session_state.images
     total = len(imgs)
@@ -1235,7 +1409,7 @@ def display_slideshow_page():
         selected_cols = st.columns(min(5, len(st.session_state.selected_slideshow_images)))
         for i, sel_img in enumerate(st.session_state.selected_slideshow_images[:5]):
             with selected_cols[i]:
-                display_image_with_fallback(sel_img, caption=f"#{i+1}", show_source=False, width=100)
+                display_image_with_fallback(sel_img, caption=f"Image {i+1}", show_source=False, width=100)
         if len(st.session_state.selected_slideshow_images) > 5:
             st.info(f"... and {len(st.session_state.selected_slideshow_images) - 5} more")
     
@@ -1694,7 +1868,7 @@ def display_library_page():
 # Main Page Router
 # ============================================================================
 if st.session_state.current_page == "Slideshow":
-    display_slideshow_page()
+    render_slideshow_page() # Changed from display_slideshow_page
 elif st.session_state.current_page == "Generate":
     display_generate_page()
 elif st.session_state.current_page == "History":
