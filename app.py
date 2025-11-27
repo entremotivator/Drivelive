@@ -26,8 +26,14 @@ DEFAULT_FOLDERS = {
 DEFAULT_FOLDER_URL = "https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link"
 
 # API Configuration
-API_BASE_URL = "https://zyloai.xyz"
+API_BASE_URL = "https://api.kie.ai/api/v1/jobs"
+API_FALLBACK_URL = "https://zyloai.xyz"  # Fallback if primary fails
 API_HEADERS = {"Content-Type": "application/json"}
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+RETRY_BACKOFF = 2  # exponential backoff multiplier
 
 # ============================================================================
 # Page Configuration
@@ -1014,7 +1020,7 @@ def delete_gdrive_file(file_id: str):
 # API Functions - All Generation Models
 # ============================================================================
 def create_task(api_key, model, input_params, callback_url=None):
-    """Create a generation task."""
+    """Create a generation task with retry logic and fallback endpoints."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -1028,58 +1034,132 @@ def create_task(api_key, model, input_params, callback_url=None):
     if callback_url:
         payload["callBackUrl"] = callback_url
     
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/createTask", # Changed from BASE_URL
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
+    # Try primary endpoint first, then fallback
+    endpoints = [
+        (API_BASE_URL, "Primary API"),
+        (API_FALLBACK_URL, "Fallback API")
+    ]
+    
+    last_error = None
+    
+    for base_url, endpoint_name in endpoints:
+        print(f"[v0] Attempting to create task using {endpoint_name}: {base_url}")
         
-        data = response.json()
-        if response.status_code == 200:
-            if data.get("code") == 200:
-                st.session_state.stats['total_tasks'] += 1
-                return {"success": True, "task_id": data["data"]["taskId"]}
-            else:
-                return {"success": False, "error": data.get('msg', 'Unknown API error')}
-        else:
-            return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"Network error: {str(e)}"}
-    except json.JSONDecodeError:
-        return {"success": False, "error": "Invalid JSON response from API"}
-    except Exception as e:
-        return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
+        for attempt in range(MAX_RETRIES):
+            try:
+                delay = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                
+                if attempt > 0:
+                    print(f"[v0] Retry attempt {attempt + 1}/{MAX_RETRIES} after {delay}s delay")
+                    time.sleep(delay)
+                
+                response = requests.post(
+                    f"{base_url}/createTask",
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                )
+                
+                print(f"[v0] Response status: {response.status_code}")
+                
+                data = response.json()
+                if response.status_code == 200:
+                    if data.get("code") == 200:
+                        st.session_state.stats['total_tasks'] += 1
+                        print(f"[v0] Task created successfully: {data['data']['taskId']}")
+                        return {"success": True, "task_id": data["data"]["taskId"], "endpoint": endpoint_name}
+                    else:
+                        error_msg = data.get('msg', 'Unknown API error')
+                        print(f"[v0] API error: {error_msg}")
+                        last_error = error_msg
+                        break  # Don't retry on API-level errors
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text}"
+                    print(f"[v0] HTTP error: {error_msg}")
+                    last_error = error_msg
+                    
+            except requests.exceptions.ConnectionError as e:
+                error_msg = f"Connection error: Unable to reach {endpoint_name}"
+                print(f"[v0] {error_msg}: {str(e)}")
+                last_error = error_msg
+                
+            except requests.exceptions.Timeout as e:
+                error_msg = f"Timeout error: {endpoint_name} took too long to respond"
+                print(f"[v0] {error_msg}")
+                last_error = error_msg
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Network error with {endpoint_name}: {str(e)}"
+                print(f"[v0] {error_msg}")
+                last_error = error_msg
+                
+            except json.JSONDecodeError:
+                error_msg = f"Invalid JSON response from {endpoint_name}"
+                print(f"[v0] {error_msg}")
+                last_error = error_msg
+                break  # Don't retry on JSON errors
+                
+            except Exception as e:
+                error_msg = f"Unexpected error with {endpoint_name}: {str(e)}"
+                print(f"[v0] {error_msg}")
+                last_error = error_msg
+        
+        # If we got here and didn't return, try next endpoint
+        print(f"[v0] {endpoint_name} failed after {MAX_RETRIES} attempts, trying next endpoint...")
+    
+    # All endpoints failed
+    return {
+        "success": False, 
+        "error": f"All API endpoints failed. Last error: {last_error}. Please check your API key and network connection."
+    }
 
 def check_task_status(api_key, task_id):
-    """Check task status."""
+    """Check task status with retry logic."""
     headers = {
         "Authorization": f"Bearer {api_key}",
     }
     
-    try:
-        response = requests.get(
-            f"{API_BASE_URL}/recordInfo", # Changed from BASE_URL
-            headers=headers,
-            params={"taskId": task_id},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("code") == 200:
-                return {"success": True, "data": data["data"]}
-            else:
-                return {"success": False, "error": data.get('msg', 'Unknown API error')}
-        else:
-            return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"Network error: {str(e)}"}
-    except json.JSONDecodeError:
-        return {"success": False, "error": "Invalid JSON response from API"}
-    except Exception as e:
-        return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
+    # Try primary endpoint first, then fallback
+    endpoints = [
+        (API_BASE_URL, "Primary API"),
+        (API_FALLBACK_URL, "Fallback API")
+    ]
+    
+    last_error = None
+    
+    for base_url, endpoint_name in endpoints:
+        for attempt in range(MAX_RETRIES):
+            try:
+                if attempt > 0:
+                    delay = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                    time.sleep(delay)
+                
+                response = requests.get(
+                    f"{base_url}/recordInfo",
+                    headers=headers,
+                    params={"taskId": task_id},
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("code") == 200:
+                        return {"success": True, "data": data["data"]}
+                    else:
+                        last_error = data.get('msg', 'Unknown API error')
+                        break
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text}"
+                    
+            except requests.exceptions.RequestException as e:
+                last_error = f"Network error: {str(e)}"
+            except json.JSONDecodeError:
+                last_error = "Invalid JSON response"
+                break
+            except Exception as e:
+                last_error = f"Unexpected error: {str(e)}"
+    
+    return {"success": False, "error": last_error}
 
 def poll_task_until_complete(api_key, task_id, max_attempts=60, delay=2):
     """Poll task status until completion or timeout."""
@@ -1924,7 +2004,7 @@ def display_generate_page():
                     st.session_state.current_task = task_id
                     st.rerun()
                 else:
-                    st.error(f"Failed to create task: {result.get('error', 'Unknown error')}")
+                    display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
 
     with tab2:
         st.header("Image Edit - Qwen Model")
@@ -2004,7 +2084,7 @@ def display_generate_page():
                         st.session_state.edit_mode = None
                         st.rerun()
                     else:
-                        st.error(f"Failed to create task: {result.get('error', 'Unknown error')}")
+                        display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
 
     with tab3:
         st.header("Image Edit - Seedream V4 Model")
@@ -2077,7 +2157,7 @@ def display_generate_page():
                         st.session_state.edit_mode = None
                         st.rerun()
                     else:
-                        st.error(f"Failed to create task: {result.get('error', 'Unknown error')}")
+                        display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
 
 def display_history_page():
     st.title("Task History")
@@ -2134,7 +2214,7 @@ def display_history_page():
                     st.session_state.task_history[i]['status'] = 'fail'
                     st.session_state.task_history[i]['error'] = fail_msg
                     st.session_state.stats['failed_tasks'] += 1
-                    st.error(f"Task failed: {fail_msg}")
+                    display_error_with_help(fail_msg) # Use enhanced error display
                     st.rerun()
         
         elif status == 'success':
@@ -2202,7 +2282,7 @@ def display_history_page():
                 st.info("No results found for this task.")
         
         elif status == 'fail':
-            st.error(f"Failure reason: `{task.get('error', 'Unknown error')}`")
+            display_error_with_help(task.get('error', 'Unknown error')) # Use enhanced error display
             
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2434,6 +2514,41 @@ def display_library_page():
         avg_size = total_size_mb / len(filtered_images) if filtered_images else 0
         st.metric("Avg Size", f"{avg_size:.2f} MB")
 
+def display_error_with_help(error_message):
+    """Display error with helpful troubleshooting information."""
+    st.error(f"❌ Error: {error_message}")
+    
+    with st.expander("🔧 Troubleshooting Tips"):
+        st.markdown(f"""
+        **Common Issues and Solutions:**
+        
+        1. **Network/Connection Errors:**
+           - Check your internet connection
+           - Try again in a few moments
+           - The API service may be temporarily unavailable
+        
+        2. **API Key Issues:**
+           - Verify your API key is correct in the sidebar
+           - Check if your API key has expired
+           - Ensure your API account has sufficient credits
+        
+        3. **Timeout Errors:**
+           - The server may be under heavy load
+           - Try with a smaller image or simpler prompt
+           - Wait a few minutes and try again
+        
+        4. **DNS/Resolution Errors:**
+           - The API endpoint may be temporarily unreachable
+           - Your network may be blocking the API domain
+           - Try using a different network connection
+        
+        **Current Configuration:**
+        - Primary Endpoint: `{API_BASE_URL}`
+        - Fallback Endpoint: `{API_FALLBACK_URL}`
+        - Retry Attempts: {MAX_RETRIES}
+        - Timeout: 30 seconds
+        """)
+
 # ============================================================================
 # Main Page Router
 # ============================================================================
@@ -2444,5 +2559,8 @@ elif st.session_state.current_page == "Generate":
     display_generate_page()
 elif st.session_state.current_page == "History":
     display_history_page()
+elif st.session_state.current_page == "Library":
+    display_library_page()
+()
 elif st.session_state.current_page == "Library":
     display_library_page()
