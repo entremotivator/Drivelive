@@ -377,7 +377,11 @@ def init_session_state():
         'editing_folder': None, # State for editing folder name
         'show_folder_manager': False, # State to toggle folder manager visibility
         'last_loaded_folder': None,  # Track which folder was last loaded
-        'generation_preview_images': []  # Images queued for generation with previews
+        'generation_preview_images': [],  # Images queued for generation with previews
+        'library_loaded': False, # Flag to ensure library is loaded only once
+        'all_library_images': [], # To store all loaded images for the library page
+        'library_source_filter': 'All', # For library filtering
+        'library_filter_type': 'All', # For library filtering (renamed for consistency)
     }
     
     for key, value in defaults.items():
@@ -458,142 +462,9 @@ def get_best_streamlit_url(image_data):
         image_data.get('drive_public_url'),
         image_data.get('drive_thumbnail_url'),
         image_data.get('url'),
-        image_data.get('original_generation_url')
-    ]
-    
-    for url in url_priority:
-        if url:
-            return url
-    
-    return None
-
-
-def init_session_state():
-    """Initialize all session state variables with enhanced persistence."""
-    defaults = {
-        'default_folder_url': DEFAULT_FOLDER_URL,
-        'current_index': 0,
-        'autoplay': False,
-        'images': [],
-        'slideshow_speed': 3,
-        'loop_mode': True,
-        'current_page': 'Slideshow',
-        'api_key': '',
-        'selected_images': [],  # Images selected for generation
-        'selected_slideshow_images': [],  # Images selected from slideshow
-        'selected_library_images': [],  # Images selected from library
-        'task_history': [],
-        'library_images': [],
-        'library_view_mode': 'Grid',  # Default to Grid view
-        'library_sort_by': 'Newest First',  # Default sort order
-        'saved_folders': {
-            'Folder 1': 'https://drive.google.com/drive/folders/1fbHjKWNRleTk2giAQiCGR9s8V0VE14IO?usp=share_link',
-            'Folder 2': 'https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link',
-            'Folder 3': 'https://drive.google.com/drive/folders/10e7Swca0GHr6bIQ6_M6JRs4WBqZ4K7iJ?usp=share_link'
-        },
-        'gdrive_authenticated': False,
-        'gdrive_folder_id': None,
-        'gdrive_folder_name': 'Generated Images',
-        'auto_upload': False,
-        'show_api_input': False,
-        'service_account_info': None, # Added for service account persistence
-        'credentials': None, # Added for service account persistence
-        'service': None, # Added for service account persistence
-        'polling_active': False, # For task polling
-        'current_task': None, # To track the task being polled
-        'stats': { # Initialize stats dictionary
-            'total_tasks': 0,
-            'successful_tasks': 0,
-            'failed_tasks': 0,
-            'total_images': 0,
-            'uploaded_images': 0
-        },
-        'selected_image_for_edit': None, # Image selected for editing
-        'edit_mode': None, # Mode of editing (qwen, seedream)
-        'image_preview_cache': {},  # Cache normalized image data
-        'editing_folder': None, # State for editing folder name
-        'show_folder_manager': False, # State to toggle folder manager visibility
-        'last_loaded_folder': None,  # Track which folder was last loaded
-        'generation_preview_images': []  # Images queued for generation with previews
-    }
-    
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-def normalize_image_urls(image_data):
-    """
-    Normalize and enhance image data with all URL variants for maximum compatibility.
-    Ensures consistent URL structure across all pages and selections.
-    """
-    if not image_data:
-        return image_data
-    
-    # Ensure image_data is a dictionary
-    if not isinstance(image_data, dict):
-        # Attempt to convert if it's a string URL
-        if isinstance(image_data, str) and image_data.startswith('http'):
-            image_data = {'url': image_data}
-        else:
-            return {} # Return empty if cannot process
-
-    file_id = image_data.get('id') or image_data.get('file_id')
-    
-    # Ensure we have a file_id stored
-    if file_id and 'file_id' not in image_data:
-        image_data['file_id'] = file_id
-    
-    if file_id:
-        # Generate all possible URL formats
-        image_data['drive_direct_link'] = f"https://lh3.googleusercontent.com/d/{file_id}"
-        image_data['drive_public_url'] = f"https://drive.google.com/uc?export=view&id={file_id}"
-        image_data['drive_thumbnail_url'] = f"https://drive.google.com/thumbnail?id={file_id}&sz=w400"
-        image_data['high_res_thumbnail'] = f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
-        image_data['drive_web_view'] = f"https://drive.google.com/file/d/{file_id}/view"
-        
-        # Set primary URL if not already set
-        if not image_data.get('url'):
-            image_data['url'] = image_data['drive_direct_link']
-        
-        # Preserve original URLs if they exist
-        if not image_data.get('original_url') and image_data.get('url'):
-            image_data['original_url'] = image_data['url']
-    
-    # Preserve generation URLs
-    if image_data.get('original_generation_url') and not image_data.get('generation_source'):
-        image_data['generation_source'] = 'ai_generated'
-    
-    # Ensure basic URL fields exist if an image_data was provided
-    if not image_data.get('url'):
-        image_data['url'] = image_data.get('original_generation_url') or image_data.get('original_url')
-    
-    # Fallback for name if not present
-    if not image_data.get('name'):
-        image_data['name'] = f"Image_{image_data.get('id', random.randint(1000, 9999))}"
-
-    return image_data
-
-
-def get_best_streamlit_url(image_data):
-    """
-    Get the best URL for displaying in Streamlit based on testing.
-    Priority: CDN direct > high-res thumbnail > public URL > thumbnail
-    """
-    if not image_data:
-        return None
-    
-    # Try in order of known Streamlit compatibility
-    url_priority = [
-        image_data.get('drive_direct_link'),
-        image_data.get('high_res_thumbnail'),
-        image_data.get('drive_public_url'),
-        image_data.get('drive_thumbnail_url'),
-        image_data.get('url'),
-        image_data.get('original_generation_url')
+        image_data.get('original_generation_url'),
+        image_data.get('webContentLink'), # From Drive API listing
+        image_data.get('thumbnailLink') # Also from Drive API listing
     ]
     
     for url in url_priority:
@@ -608,7 +479,7 @@ def extract_folder_id(url: str):
     patterns = [
         r'/folders/([a-zA-Z0-9_-]+)',
         r'id=([a-zA-Z0-9_-]+)',
-        r'^([a-zA-Z0-9_-]+)$'
+        r'^([a-zA-Z0-9_-]+)$' # For cases where only the ID is provided
     ]
     for p in patterns:
         m = re.search(p, url)
@@ -619,9 +490,9 @@ def extract_folder_id(url: str):
 def extract_file_id(url: str):
     """Extract file ID from Google Drive URL"""
     patterns = [
-        r'/d/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'^([a-zA-Z0-9_-]+)$'
+        r'/d/([a-zA-Z0-9_-]+)', # Common shared link format
+        r'id=([a-zA-Z0-9_-]+)', # Query parameter format
+        r'^([a-zA-Z0-9_-]+)$'  # Case where only ID is provided
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -638,17 +509,16 @@ def get_folder_name_from_id(folder_id: str) -> str:
     """Get a friendly folder name from the stored folders dictionary."""
     saved_folders = st.session_state.get('saved_folders', {})
     
+    # Ensure saved_folders is a list of dictionaries for consistent access
     if isinstance(saved_folders, dict):
-        for name, url in saved_folders.items():
-            if folder_id in url:
-                return name
-    elif isinstance(saved_folders, list):
-        for folder in saved_folders:
-            if isinstance(folder, dict):
-                url = folder.get('url', '')
-                name = folder.get('name', '')
+        saved_folders = [{"name": k, "url": v} for k, v in saved_folders.items()]
+
+    if isinstance(saved_folders, list):
+        for folder_config in saved_folders:
+            if isinstance(folder_config, dict):
+                url = folder_config.get('url', '')
                 if folder_id in url:
-                    return name
+                    return folder_config.get('name', "Unknown Folder")
     
     return "Unknown Folder"
 
@@ -657,6 +527,7 @@ def organize_images_by_folder(images):
     folders = {}
     for img in images:
         folder_id = img.get('folder_id', 'unknown')
+        # Attempt to get a friendly name; fall back to folder_id if not found
         folder_name = img.get('folder_name', get_folder_name_from_id(folder_id))
         
         if folder_name not in folders:
@@ -738,12 +609,22 @@ def display_url_options_card(image_data):
     
     if image_data.get('webViewLink'):
         url_types.append({
-            'label': 'Drive Web View',
+            'label': 'Drive Web View Link',
             'url': image_data['webViewLink'],
             'color': '#17a2b8',
             'icon': '🌐',
             'desc': 'Open in Google Drive web interface',
             'priority': 7
+        })
+        
+    if image_data.get('webContentLink'): # From Drive API listing
+        url_types.append({
+            'label': 'Drive Web Content Link',
+            'url': image_data['webContentLink'],
+            'color': '#6c757d',
+            'icon': '🔗',
+            'desc': 'Direct link to content from Drive API',
+            'priority': 8
         })
     
     # Sort by priority
@@ -770,15 +651,15 @@ def display_url_options_card(image_data):
         
         copy_col, test_col = st.columns([1, 1])
         with copy_col:
-            if st.button(f"📋 Copy Full URL", key=f"copy_{url_info['label']}_{image_data.get('id', 'unknown')}", use_container_width=True):
+            if st.button(f"📋 Copy URL", key=f"copy_{url_info['label']}_{image_data.get('id', 'unknown')}_{random.randint(1000,9999)}", use_container_width=True):
                 st.code(url_info['url'], language="text")
-                st.success("✓ URL ready to copy!")
+                st.success("✓ URL copied!")
         with test_col:
-            if st.button(f"🧪 Test in Streamlit", key=f"test_{url_info['label']}_{image_data.get('id', 'unknown')}", use_container_width=True):
+            if st.button(f"🧪 Test Display", key=f"test_{url_info['label']}_{image_data.get('id', 'unknown')}_{random.randint(1000,9999)}", use_container_width=True):
                 with st.spinner(f"Testing {url_info['label']}..."):
                     try:
-                        st.image(url_info['url'], caption=f"✓ {url_info['label']} WORKS!", use_container_width=True)
-                        st.success(f"✅ SUCCESS: {url_info['label']} displays correctly in Streamlit!")
+                        st.image(url_info['url'], caption=f"✓ {url_info['label']} displays correctly", use_container_width=True)
+                        st.success(f"✅ SUCCESS: {url_info['label']} displays correctly!")
                     except Exception as e:
                         st.error(f"❌ FAILED: {str(e)[:80]}")
                         print(f"[v0] Test failed for {url_info['label']}: {str(e)}")
@@ -786,117 +667,125 @@ def display_url_options_card(image_data):
     st.markdown("</div>", unsafe_allow_html=True)
 
 def load_images_from_folder(folder_url):
-    """Load images from Google Drive folder URL with normalized URLs."""
+    """Load images from Google Drive folder URL with normalized URLs using multiple extraction methods."""
     try:
         folder_id = extract_folder_id(folder_url)
         if not folder_id:
+            st.error("Invalid folder URL format.")
             return []
         
-        # Use Google Drive API for potentially more reliable fetching
-        # This requires proper authentication for private folders,
-        # but for public folders, we might rely on scraping or limited public API access.
-        # The provided API key 'AIzaSyB9scJaz-qNMZqJdvHKCl0g5kh2THBXO5g' is likely invalid/personal.
-        # For public access, rely on scraping methods or direct URL generation if possible.
-        # The current implementation uses scraping as a fallback.
-
-        # Attempting to use scraping as a primary method for public folders.
-        # If authentication is present, more robust methods can be used.
+        print(f"[v0] Loading images from folder: {folder_id}")
         
         api_url = f"https://drive.google.com/drive/folders/{folder_id}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         
-        response = requests.get(api_url, headers=headers, timeout=20) # Increased timeout
+        response = requests.get(api_url, headers=headers, timeout=30)
         print(f"[v0] Drive HTML response status: {response.status_code}")
         
-        if response.status_code == 200:
-            html_content = response.text
-            
-            # Regex to find potential file IDs (common patterns)
-            # 33-character IDs are very common
-            all_file_ids = re.findall(r'"([a-zA-Z0-9_-]{33})"', html_content)
-            # 28-character IDs also appear
-            alt_file_ids = re.findall(r'"([a-zA-Z0-9_-]{28})"', html_content)
-            
-            # Combine and find unique IDs, prioritizing 33-char ones
-            potential_ids = list(dict.fromkeys(all_file_ids + alt_file_ids))
-            
-            images = []
-            seen_ids = set()
-            
-            print(f"[v0] Found {len(potential_ids)} potential file IDs.")
-
-            for file_id in potential_ids:
-                if file_id == folder_id or file_id in seen_ids:
-                    continue
-                seen_ids.add(file_id)
-                
-                direct_cdn_url = f"https://lh3.googleusercontent.com/d/{file_id}"
-                public_view_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-                thumbnail_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1200"
-                high_res_thumbnail = f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
-                web_view_link = f"https://drive.google.com/file/d/{file_id}/view"
-                
-                image_data = {
-                    "name": f"Image {len(images)+1}", # Placeholder name, can be improved
-                    "url": direct_cdn_url,  # Primary URL is CDN link
-                    "source": "gdrive_public",
-                    "file_id": file_id,
-                    "folder_id": folder_id,
-                    "folder_name": get_folder_name_from_id(folder_id), # Get friendly name
-                    
-                    "drive_direct_link": direct_cdn_url,
-                    "drive_public_url": public_view_url,
-                    "drive_thumbnail_url": thumbnail_url,
-                    "high_res_thumbnail": high_res_thumbnail,
-                    "webViewLink": web_view_link,
-                    "id": file_id, # Ensure 'id' is also set
-                    "original_url": direct_cdn_url, # Treat as original for public
-                    "original_generation_url": direct_cdn_url
-                }
-                images.append(normalize_image_urls(image_data))
-            
-            print(f"[v0] Extracted {len(images)} images.")
-            
-            if images:
-                st.success(f"✓ Found {len(images)} images in '{get_folder_name_from_id(folder_id)}'")
-                with st.expander("📋 View Sample URLs (First 3)", expanded=False):
-                    for idx, img in enumerate(images[:3]):
-                        st.markdown(f"**Image {idx+1}:**")
-                        st.json({
-                            "CDN Direct (Best)": img.get('drive_direct_link', 'N/A'),
-                            "Public View": img.get('drive_public_url', 'N/A'),
-                            "Thumbnail": img.get('drive_thumbnail_url', 'N/A'),
-                            "High-Res Thumb": img.get('high_res_thumbnail', 'N/A')
-                        })
-                        st.markdown("---")
-            else:
-                st.warning("No images found. Ensure the folder is shared publicly with 'Anyone with the link can view'.")
-            
-            return images
-            
-        else:
-            st.error(f"Failed to fetch folder content. Status code: {response.status_code}")
-            print(f"[v0] Folder fetch failed: {response.status_code}")
+        if response.status_code != 200:
+            st.error(f"Failed to access folder. Status: {response.status_code}. Ensure folder is publicly shared.")
             return []
             
+        html_content = response.text
+        
+        # Multiple regex patterns to extract file IDs
+        # Pattern 1: Standard 33-character file IDs
+        pattern_33 = r'"([a-zA-Z0-9_-]{33})"'
+        # Pattern 2: 28-character file IDs (also valid)
+        pattern_28 = r'"([a-zA-Z0-9_-]{28})"'
+        # Pattern 3: Look for IDs in specific Drive contexts
+        pattern_context = r'data-id="([a-zA-Z0-9_-]{28,33})"'
+        
+        ids_33 = re.findall(pattern_33, html_content)
+        ids_28 = re.findall(pattern_28, html_content)
+        ids_context = re.findall(pattern_context, html_content)
+        
+        # Combine all found IDs, prioritizing 33-char, then context, then 28-char
+        all_ids = ids_33 + ids_context + ids_28
+        potential_ids = list(dict.fromkeys(all_ids))  # Remove duplicates while preserving order
+        
+        print(f"[v0] Found {len(potential_ids)} potential file IDs (33-char: {len(ids_33)}, 28-char: {len(ids_28)}, context: {len(ids_context)})")
+        
+        if not potential_ids:
+            st.warning("No file IDs found in folder HTML. The folder may be empty or not publicly accessible.")
+            st.info("💡 Tip: Make sure the folder is shared with 'Anyone with the link can view' permissions.")
+            return []
+        
+        images = []
+        seen_ids = set()
+        
+        # Try to validate IDs by attempting to access them
+        valid_count = 0
+        for file_id in potential_ids:
+            if file_id == folder_id or file_id in seen_ids:
+                continue
+            seen_ids.add(file_id)
+            
+            # Generate all URL variants
+            direct_cdn_url = f"https://lh3.googleusercontent.com/d/{file_id}"
+            public_view_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            thumbnail_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1200"
+            high_res_thumbnail = f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
+            web_view_link = f"https://drive.google.com/file/d/{file_id}/view"
+            
+            image_data = {
+                "name": f"Image_{file_id[:8]}", 
+                "url": direct_cdn_url,
+                "source": "gdrive_public",
+                "file_id": file_id,
+                "folder_id": folder_id,
+                "folder_name": get_folder_name_from_id(folder_id),
+                "drive_direct_link": direct_cdn_url,
+                "drive_public_url": public_view_url,
+                "drive_thumbnail_url": thumbnail_url,
+                "high_res_thumbnail": high_res_thumbnail,
+                "webViewLink": web_view_link,
+                "id": file_id,
+                "original_url": direct_cdn_url,
+                "original_generation_url": direct_cdn_url,
+                "size": 0,
+                "createdTime": "",
+                "modifiedTime": ""
+            }
+            images.append(normalize_image_urls(image_data))
+            valid_count += 1
+        
+        print(f"[v0] Extracted {len(images)} images from folder")
+        
+        if images:
+            st.success(f"✓ Loaded {len(images)} images from '{get_folder_name_from_id(folder_id)}'")
+            with st.expander("📋 View Sample URLs (First 3)", expanded=False):
+                for idx, img in enumerate(images[:3]):
+                    st.markdown(f"**Image {idx+1}: {img.get('name', 'Unknown')}**")
+                    st.json({
+                        "CDN Direct (Best for Streamlit)": img.get('drive_direct_link', 'N/A'),
+                        "Public View": img.get('drive_public_url', 'N/A'),
+                        "High-Res Thumbnail": img.get('high_res_thumbnail', 'N/A'),
+                        "Standard Thumbnail": img.get('drive_thumbnail_url', 'N/A')
+                    })
+                    st.markdown("---")
+        else:
+            st.warning("⚠️ No valid image IDs found in this folder.")
+            st.info("**Troubleshooting:**\n- Ensure the folder contains image files\n- Verify folder is shared publicly ('Anyone with the link can view')\n- Try a different folder")
+        
+        return images
+        
     except requests.exceptions.Timeout:
-        st.error("Request timed out while loading folder. Try again.")
+        st.error("⏱️ Request timed out. The folder may be too large. Try a smaller folder or check your connection.")
         print("[v0] Timeout loading folder")
         return []
     except ValueError as ve:
-        st.error(f"Invalid folder URL: {ve}")
+        st.error(f"❌ Invalid folder URL: {ve}")
         print(f"[v0] Invalid folder URL: {ve}")
         return []
     except Exception as e:
-        st.error(f"An unexpected error occurred: {str(e)}")
+        st.error(f"❌ Unexpected error: {str(e)}")
         print(f"[v0] Error loading folder: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
         return []
-
-def get_public_drive_images(folder_id: str, folder_name: str = None):
-    """Get publicly accessible images from Google Drive folder."""
-    return get_gdrive_image_urls(folder_id, folder_name)
 
 def get_gdrive_image_urls(folder_id: str, folder_name: str = None):
     """
@@ -1093,6 +982,11 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
         url_val = image_data.get('url')
         if url_val:
             urls_to_try.append(('Standard URL', url_val, '#6c757d'))
+
+    if image_data.get('webContentLink') and image_data.get('webContentLink') not in [u[1] for u in urls_to_try]:
+        url_val = image_data.get('webContentLink')
+        if url_val:
+            urls_to_try.append(('Drive Content', url_val, '#6c757d'))
     
     if not urls_to_try:
         st.error("No valid image URLs found")
@@ -1180,8 +1074,11 @@ def display_image_grid(images, columns=3, show_metadata=True, show_actions=True)
                     if image_data.get('original_generation_url') or image_data.get('original_url'):
                         metadata_badges.append("<span style='background:#FF6B6B;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>Original</span>")
                     
-                    if image_data.get('drive_public_url') or image_data.get('public_image_url'):
+                    if image_data.get('drive_public_url') or image_data.get('public_image_url') or image_data.get('source') == 'gdrive_public':
                         metadata_badges.append("<span style='background:#4285F4;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>Drive</span>")
+                    
+                    if image_data.get('source') == 'gdrive_upload' or image_data.get('source') == 'gdrive_storage':
+                         metadata_badges.append("<span style='background:#17a2b8;color:white;padding:3px 6px;border-radius:4px;font-size:10px;margin-right:4px;'>Uploaded</span>")
                     
                     if image_data.get('createdTime'):
                         try:
@@ -1237,14 +1134,7 @@ def display_image_grid(images, columns=3, show_metadata=True, show_actions=True)
                             st.rerun()
                     
                     with st.expander("View All URLs"):
-                        if image_data.get('url'):
-                            st.code(f"Primary URL:\n{image_data['url']}", language="text")
-                        if image_data.get('drive_public_url'):
-                            st.code(f"Drive Public:\n{image_data['drive_public_url']}", language="text")
-                        if image_data.get('drive_direct_link'):
-                            st.code(f"Drive Direct:\n{image_data['drive_direct_link']}", language="text")
-                        if image_data.get('drive_thumbnail_url'):
-                            st.code(f"Thumbnail:\n{image_data['drive_thumbnail_url']}", language="text")
+                        display_url_options_card(image_data)
                 
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1384,7 +1274,7 @@ def render_folder_manager():
                     with st.spinner("Loading images..."):
                         try:
                             folder_id = extract_folder_id(folder_url)
-                            gdrive_imgs = get_public_drive_images(folder_id, folder_name) # Pass folder_name
+                            gdrive_imgs = get_gdrive_image_urls(folder_id, folder_name) # Pass folder_name
                             st.session_state.images = gdrive_imgs
                             st.session_state.current_index = 0
                             st.session_state.default_folder_url = folder_url
@@ -1488,8 +1378,12 @@ with st.sidebar:
         with col2:
             if st.button("Refresh Library", use_container_width=True):
                 with st.spinner("Refreshing library..."):
-                    st.session_state.library_images = load_complete_library()
-                st.success("Library refreshed!")
+                    # Reset library loaded flag to force reload
+                    st.session_state.library_loaded = False
+                    # Clear existing library images to ensure a clean load
+                    st.session_state.all_library_images = [] 
+                    st.rerun()
+                st.success("Library refresh initiated!")
         
         if st.button("Disconnect", use_container_width=True):
             st.session_state.gdrive_authenticated = False
@@ -1497,10 +1391,22 @@ with st.sidebar:
             st.session_state.credentials = None
             st.session_state.service_account_info = None
             st.session_state.gdrive_folder_id = None
+            st.session_state.library_images = [] # Clear library on disconnect
+            st.session_state.library_loaded = False # Reset load flag
             st.rerun()
     
     st.markdown("---")
     
+    # Folder Management button
+    st.header("Manage Folders")
+    if st.button("Open Folder Manager", use_container_width=True):
+        st.session_state.show_folder_manager = not st.session_state.show_folder_manager
+        st.rerun()
+        
+    if st.session_state.show_folder_manager:
+        render_folder_manager()
+        st.markdown("---")
+
     # Statistics
     st.header("Statistics")
     
@@ -1752,6 +1658,16 @@ def save_and_upload_results(task_id, model, prompt, result_urls):
                                     'source': 'gdrive_upload'
                                 })
                                 st.session_state.stats['uploaded_images'] += 1
+                                # Add to library session state for immediate feedback
+                                uploaded_image_data = normalize_image_urls({
+                                    'url': drive_url,
+                                    'name': file_name,
+                                    'source': 'gdrive_upload',
+                                    'folder_name': 'Drive Storage', # Generic for uploaded files
+                                    'webViewLink': drive_url
+                                })
+                                st.session_state.library_images.insert(0, uploaded_image_data)
+                                st.session_state.library_loaded = True # Ensure flag is set if library was empty
                             else:
                                 print(f"[v0] Upload_to_drive returned None for '{file_name}'.")
                     except Exception as e:
@@ -1824,7 +1740,7 @@ def create_app_folder():
         print("[v0] No Drive service available for folder creation")
         return None
     
-    folder_name = "AI_Slideshow_Generator"
+    folder_name = "AI_Slideshow_Generator_Content"
     
     try:
         # Check if folder already exists
@@ -1959,82 +1875,81 @@ def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
         return None
 
 def list_gdrive_images(folder_id=None, fetch_all=False):
-    """List images from a specific folder or the entire Drive if fetch_all=True."""
-    if not st.session_state.get('service'):
-        print("[v0] No Drive service available for listing images")
-        return []
-
-    if folder_id is None:
-        folder_id = st.session_state.get('gdrive_folder_id')
+    """List images from a specific folder - tries authenticated access first, then public scraping."""
     
-    if not folder_id:
-        print("[v0] No folder ID available for listing images")
-        return []
+    # Try authenticated Drive access first if available
+    if st.session_state.get('service'):
+        print("[v0] Using authenticated Drive service to list images")
+        
+        if folder_id is None:
+            folder_id = st.session_state.get('gdrive_folder_id')
+        
+        if not folder_id:
+            print("[v0] No folder ID available")
+            return []
 
-    images = []
-    try:
-        # Query for image mime types and exclude trashed items
-        query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed=false"
-        
-        page_token = None
-        pages_fetched = 0
-        max_pages = 10  # Limit pages to prevent excessive fetching
-        
-        while True:
-            if pages_fetched >= max_pages:
-                print(f"[v0] Reached max pages limit ({max_pages}) for Drive listing, stopping pagination.")
-                break
+        images = []
+        try:
+            query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed=false"
+            
+            page_token = None
+            pages_fetched = 0
+            max_pages = 10
+            
+            while True:
+                if pages_fetched >= max_pages:
+                    print(f"[v0] Reached max pages ({max_pages})")
+                    break
+                    
+                response = st.session_state.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields="nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, webViewLink, thumbnailLink, webContentLink)",
+                    pageSize=100,
+                    pageToken=page_token
+                ).execute()
                 
-            response = st.session_state.service.files().list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, webViewLink, thumbnailLink, webContentLink)",
-                pageSize=100,  # Fetch 100 per page for efficiency
-                pageToken=page_token
-            ).execute()
-            
-            for file in response.get("files", []):
-                image_data = {
-                    "id": file["id"],
-                    "file_id": file["id"],
-                    "name": file.get("name", "Unknown Image"),
-                    "mimeType": file.get("mimeType", ""),
-                    "size": file.get("size", 0),
-                    "createdTime": file.get("createdTime", ""),
-                    "modifiedTime": file.get("modifiedTime", ""),
-                    "webViewLink": file.get("webViewLink", ""),
-                    "thumbnailLink": file.get("thumbnailLink", ""), # May not always be reliable
-                    "webContentLink": file.get("webContentLink", ""), # Direct link to content
-                    "source": "gdrive_storage",
-                    "folder_id": folder_id,
-                    "folder_name": "Drive Storage", # Generic name for uploaded items
-                    "url": file.get("webContentLink", ""),
-                    "original_url": file.get("webContentLink", ""),
-                    "original_generation_url": file.get("webContentLink", ""),
-                }
-                # Normalize the image data for display and compatibility
-                image_data = normalize_image_urls(image_data)
-                images.append(image_data)
-            
-            page_token = response.get("nextPageToken", None)
-            pages_fetched += 1
-            
-            if page_token is None:
-                break # No more pages
+                for file in response.get("files", []):
+                    image_data = {
+                        "id": file["id"],
+                        "file_id": file["id"],
+                        "name": file.get("name", "Unknown Image"),
+                        "mimeType": file.get("mimeType", ""),
+                        "size": file.get("size", 0),
+                        "createdTime": file.get("createdTime", ""),
+                        "modifiedTime": file.get("modifiedTime", ""),
+                        "webViewLink": file.get("webViewLink", ""),
+                        "thumbnailLink": file.get("thumbnailLink", ""),
+                        "webContentLink": file.get("webContentLink", ""),
+                        "source": "gdrive_storage",
+                        "folder_id": folder_id,
+                        "folder_name": "Drive Storage",
+                        "url": file.get("webContentLink", ""),
+                        "original_url": file.get("webContentLink", ""),
+                        "original_generation_url": file.get("webContentLink", ""),
+                    }
+                    images.append(normalize_image_urls(image_data))
                 
-        print(f"[v0] Listed {len(images)} images from Drive folder '{folder_id}' ({pages_fetched} pages fetched)")
-        return images
-        
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[v0] Error listing Drive files: {error_msg}")
-        
-        if "insufficient" in error_msg.lower() or "permission" in error_msg.lower():
-            st.warning("⚠️ Limited Drive permissions. Cannot access stored images.")
-        elif "quota" in error_msg.lower():
-            st.warning("⚠️ Drive quota exceeded.")
-        
-        return []
+                page_token = response.get("nextPageToken", None)
+                pages_fetched += 1
+                
+                if page_token is None:
+                    break
+                    
+            print(f"[v0] Listed {len(images)} images from authenticated Drive")
+            return images
+            
+        except Exception as e:
+            print(f"[v0] Error with authenticated access: {str(e)}")
+            # Fall through to public scraping method
+    
+    # Fallback to public scraping method
+    print("[v0] Attempting public folder scraping method")
+    if folder_id:
+        folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+        return load_images_from_folder(folder_url)
+    
+    return []
 
 # ============================================================================
 # Main Application Pages
@@ -2046,37 +1961,47 @@ def render_slideshow_page():
     # Folder selection dropdown at top
     st.markdown("### 🗂️ Quick Load Folders")
     
-    saved_folders = st.session_state.get('saved_folders', {})
-    if isinstance(saved_folders, dict) and saved_folders:
-        folder_options = list(saved_folders.keys())
-        selected_folder = st.selectbox(
+    saved_folders_list = st.session_state.get('saved_folders', [])
+    if isinstance(saved_folders_list, dict): # Convert dict to list if it's still in old format
+        saved_folders_list = [{"name": k, "url": v} for k, v in saved_folders_list.items()]
+        st.session_state.saved_folders = saved_folders_list
+
+    if saved_folders_list:
+        folder_options_map = {"": "Select a folder..."} # Default option
+        for folder_config in saved_folders_list:
+            folder_options_map[folder_config['name']] = folder_config['url']
+        
+        selected_folder_name = st.selectbox(
             "Choose a saved folder to load:",
-            options=[""] + folder_options,
-            format_func=lambda x: "Select a folder..." if x == "" else x,
+            options=list(folder_options_map.keys()),
+            format_func=lambda x: folder_options_map[x] if x else "Select a folder...",
             key="quick_folder_selector_slideshow" # Unique key
         )
         
-        if selected_folder and selected_folder != "":
+        if selected_folder_name and selected_folder_name != "":
+            folder_url = folder_options_map[selected_folder_name]
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.info(f"📁 {selected_folder}: {saved_folders[selected_folder]}")
+                st.info(f"📁 {selected_folder_name}: {folder_url}")
             with col2:
                 if st.button("📥 Load This Folder", use_container_width=True):
-                    with st.spinner(f"Loading images from {selected_folder}..."):
-                        folder_url = saved_folders[selected_folder]
-                        folder_id = extract_folder_id(folder_url)
-                        if folder_id:
-                            images = list_gdrive_images(folder_id)
-                            if images:
-                                st.session_state.images = images
-                                st.session_state.current_index = 0
-                                st.session_state.default_folder_url = folder_url # Update default URL
-                                st.success(f"✅ Loaded {len(images)} images from {selected_folder}")
-                                st.rerun()
+                    with st.spinner(f"Loading images from {selected_folder_name}..."):
+                        try:
+                            folder_id = extract_folder_id(folder_url)
+                            if folder_id:
+                                images = get_gdrive_image_urls(folder_id, selected_folder_name)
+                                if images:
+                                    st.session_state.images = images
+                                    st.session_state.current_index = 0
+                                    st.session_state.default_folder_url = folder_url # Update default URL
+                                    st.success(f"✅ Loaded {len(images)} images from {selected_folder_name}")
+                                    st.rerun()
+                                else:
+                                    st.error("No images found in this folder")
                             else:
-                                st.error("No images found in this folder")
-                        else:
-                            st.error("Invalid folder URL")
+                                st.error("Invalid folder URL")
+                        except Exception as e:
+                            st.error(f"Error loading folder: {str(e)}")
 
     st.markdown("---")
 
@@ -2102,7 +2027,7 @@ def render_slideshow_page():
                         if not folder_id:
                             st.error("❌ Invalid folder URL. Please check and try again.")
                         else:
-                            images = list_gdrive_images(folder_id)
+                            images = get_gdrive_image_urls(folder_id) # Rely on default name extraction
                             if images:
                                 st.session_state.images = images
                                 st.session_state.current_index = 0
@@ -2223,7 +2148,9 @@ def render_slideshow_page():
         selected_preview_cols = st.columns(min(6, len(st.session_state.selected_slideshow_images)))
         for i, sel_img in enumerate(st.session_state.selected_slideshow_images[:6]):
             with selected_preview_cols[i]:
-                display_image_with_fallback(sel_img, caption=f"#{i+1}", show_source=False, width=80)
+                # Ensure images are normalized before display
+                normalized_img = normalize_image_urls(sel_img)
+                display_image_with_fallback(normalized_img, caption=f"#{i+1}", show_source=False, width=80)
         if len(st.session_state.selected_slideshow_images) > 6:
             st.info(f"... and {len(st.session_state.selected_slideshow_images) - 6} more")
     
@@ -2272,7 +2199,7 @@ def display_generate_page():
                     color:white;padding:16px;border-radius:12px;margin-bottom:20px;
                     box-shadow:0 4px 6px rgba(0,0,0,0.1);'>
             <h3 style='margin:0;'>✓ {count} Images Ready for Generation</h3>
-            <p style='margin:4px 0 0 0;opacity:0.9;'>These images will be used as reference or edit source</p>
+            <p style='margin:4px 0 0 0;opacity:0.9;'>These images can be used as reference or edit sources</p>
         </div>
         """.format(count=len(st.session_state.selected_slideshow_images)), unsafe_allow_html=True)
         
@@ -2818,98 +2745,93 @@ def load_complete_library():
             st.success(f"✓ Loaded {len(public_folder_images)} images from {len(st.session_state.saved_folders)} public folder(s)")
     
     # Remove duplicates based on file_id, id, or url
-    seen_ids = set()
+    seen_identifiers = set()
     unique_images = []
     for img in all_library_images:
         # Create a unique identifier for deduplication
-        img_identifier = img.get('file_id') or img.get('id') or img.get('url')
-        if img_identifier and img_identifier not in seen_ids:
-            seen_ids.add(img_identifier)
+        img_identifier = img.get('file_id') or img.get('id') or img.get('url') or img.get('name') # Add name as fallback
+        if img_identifier and img_identifier not in seen_identifiers:
+            seen_identifiers.add(img_identifier)
             # Ensure normalization for all library images
             unique_images.append(normalize_image_urls(img))
     
-    print(f"[v0] Total unique images in library: {len(unique_images)}")
+    st.session_state.all_library_images = unique_images # Store in session state for library page
+    st.session_state.library_loaded = True # Mark as loaded
+    print(f"[v0] Total unique images loaded into library: {len(unique_images)}")
     return unique_images
 
 def display_library_page():
-    """Display the complete library of all images from all sources."""
+    """Display the library page with all images from Drive and saved folders."""
     st.markdown('<div class="page-header"><h1>📚 Complete Image Library</h1></div>', unsafe_allow_html=True)
 
-    # Auto-load library on first visit
-    if 'library_loaded' not in st.session_state:
+    # Auto-load library on first visit or when explicitly reloaded
+    if not st.session_state.get('library_loaded'):
         with st.spinner("Loading complete library from all sources..."):
-            st.session_state.library_images = load_complete_library()
-            st.session_state.library_loaded = True
-
-    # Header with stats and controls
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-    with col1:
-        total_images_overall = len(st.session_state.library_images)
-        st.markdown(f"### {total_images_overall:,} images total")
-    with col2:
-        current_view_mode = st.session_state.get('library_view_mode', 'Grid')
-        view_options = ["Grid", "List", "By Folder"]
+            load_complete_library()
+            # No rerun here, allow other parts of the page to render based on loaded data
+    
+    # Get all images from library
+    all_library_images = st.session_state.get('all_library_images', [])
+    
+    if not all_library_images:
+        st.info("No images in library. Load folders from Slideshow page to populate library, or connect Google Drive to upload generated images.")
         
-        # Ensure current mode is in options, default to first if not
-        if current_view_mode not in view_options:
-            current_view_mode = view_options[0]
-            st.session_state.library_view_mode = current_view_mode
-        
-        view_mode = st.selectbox(
-            "View", 
-            view_options, 
-            key="library_view_mode",
-            index=view_options.index(current_view_mode)
-        )
-    with col3:
-        current_sort_by = st.session_state.get('library_sort_by', 'Newest First')
-        sort_options = ["Newest First", "Oldest First", "Name A-Z", "Size"]
-        
-        # Ensure current sort is in options
-        if current_sort_by not in sort_options:
-            current_sort_by = sort_options[0]
-            st.session_state.library_sort_by = current_sort_by
-        
-        sort_by = st.selectbox(
-            "Sort", 
-            sort_options,
-            key="library_sort_by",
-            index=sort_options.index(current_sort_by)
-        )
-    with col4:
-        if st.button("🔄 Refresh All", use_container_width=True):
-            with st.spinner("Refreshing complete library..."):
-                st.session_state.library_images = load_complete_library()
-            st.success(f"Library refreshed! {len(st.session_state.library_images):,} images loaded")
+        if st.button("🔄 Reload Library", use_container_width=True):
+            with st.spinner("Reloading library..."):
+                load_complete_library()
             st.rerun()
-
-    # Message if library remains empty after attempted load
-    if not st.session_state.library_images and st.session_state.library_loaded:
-        st.info("📭 Your library is empty. Add images by:\n- Loading from saved public folders\n- Generating and uploading new images\n- Connecting Google Drive to access uploaded images")
         return
     
-    # Sorting logic
-    sorted_images = st.session_state.library_images.copy()
+    # Get total count for stats
+    total_images_overall = len(all_library_images)
+    
+    # Get current sort preference from session state or default to "newest"
+    current_sort = st.session_state.get('library_sort_by', 'Newest First')
+    
+    # Sorting options
+    sort_options = ["Newest First", "Oldest First", "Name (A-Z)", "Name (Z-A)", "Size (Largest)", "Size (Smallest)"]
+    
+    # Render sort control
+    sort_by = st.selectbox("Sort by", sort_options, key="library_sort_selector", 
+                           index=sort_options.index(current_sort) if current_sort in sort_options else 0)
+    
+    # Update session state only if the value has changed from the widget
+    if sort_by != st.session_state.get('library_sort_by'):
+        st.session_state.library_sort_by = sort_by
+        st.rerun() # Rerun to apply sorting immediately
+
+    # Apply sorting
+    sorted_images = all_library_images.copy()
     if sort_by == "Newest First":
         sorted_images.sort(key=lambda x: x.get('createdTime', ''), reverse=True)
     elif sort_by == "Oldest First":
-        sorted_images.sort(key=lambda x: x.get('createdTime', ''))
-    elif sort_by == "Name A-Z":
-        sorted_images.sort(key=lambda x: x.get('name', ''))
-    elif sort_by == "Size":
+        sorted_images.sort(key=lambda x: x.get('createdTime', ''), reverse=False)
+    elif sort_by == "Name (A-Z)":
+        sorted_images.sort(key=lambda x: x.get('name', '').lower())
+    elif sort_by == "Name (Z-A)":
+        sorted_images.sort(key=lambda x: x.get('name', '').lower(), reverse=True)
+    elif sort_by == "Size (Largest)":
         sorted_images.sort(key=lambda x: int(x.get('size', 0)), reverse=True)
+    elif sort_by == "Size (Smallest)":
+        sorted_images.sort(key=lambda x: int(x.get('size', 0)), reverse=False)
     
     # Search and filter section
     st.markdown("---")
-    search_col, filter_col, space_col = st.columns([3, 2, 1]) # Added space column for better alignment
+    search_col, filter_col, space_col = st.columns([3, 2, 1])
     with search_col:
         search_query = st.text_input("🔍 Search images by name", value="", key="lib_search")
     with filter_col:
-        # Define source filter options
         filter_options = ["All", "Drive Storage", "Public Folders"]
-        current_filter_type = st.session_state.get('library_filter_type', 'All') # Default to 'All'
-        source_filter = st.selectbox("Filter by source", filter_options, key="library_filter_type", index=filter_options.index(current_filter_type) if current_filter_type in filter_options else 0)
-        st.session_state.library_filter_type = source_filter # Update session state
+        current_filter_type = st.session_state.get('library_filter_type', 'All')
+        
+        source_filter = st.selectbox("Filter by source", filter_options, key="library_source_filter", 
+                                     index=filter_options.index(current_filter_type) if current_filter_type in filter_options else 0)
+        
+        # Update session state only if value changed from widget
+        if source_filter != st.session_state.get('library_filter_type'):
+            st.session_state.library_filter_type = source_filter
+            st.rerun() # Rerun to apply filter immediately
+
     
     filtered_images = sorted_images
     if search_query:
@@ -2918,7 +2840,7 @@ def display_library_page():
     # Apply source filter
     if source_filter == "Drive Storage":
         # Filter for images uploaded to authenticated Drive
-        filtered_images = [img for img in filtered_images if img.get('source') == 'gdrive_upload']
+        filtered_images = [img for img in filtered_images if img.get('source') in ['gdrive_upload', 'gdrive_storage']]
     elif source_filter == "Public Folders":
         # Filter for images loaded from public folders (excluding authenticated uploads)
         filtered_images = [img for img in filtered_images if img.get('source') == 'gdrive_public']
@@ -2928,21 +2850,29 @@ def display_library_page():
     # Display options
     st.markdown("---")
     
+    # View mode selection
+    view_mode_options = ["Grid", "List", "By Folder"]
+    current_view_mode = st.session_state.get('library_view_mode', 'Grid')
+    
+    view_mode = st.radio(
+        "Display Mode", 
+        view_mode_options, 
+        key="library_view_mode",
+        horizontal=True,
+        index=view_mode_options.index(current_view_mode) if current_view_mode in view_mode_options else 0
+    )
+    
+    # Update session state if view mode changed
+    if view_mode != st.session_state.get('library_view_mode'):
+        st.session_state.library_view_mode = view_mode
+        st.rerun()
+
     # Display by folder view
     if view_mode == "By Folder":
         st.markdown("### 📁 Images Organized by Folder")
         
-        saved_folders = st.session_state.get('saved_folders', {})
-        
         # Organize images by folder
-        folders_dict = {}
-        for img in filtered_images:
-            folder_id = img.get('folder_id', 'unknown')
-            folder_name = get_folder_name_from_id(folder_id)
-            
-            if folder_name not in folders_dict:
-                folders_dict[folder_name] = []
-            folders_dict[folder_name].append(img)
+        folders_dict = organize_images_by_folder(filtered_images)
         
         # Display each folder
         for folder_name, folder_images in folders_dict.items():
@@ -2953,11 +2883,13 @@ def display_library_page():
                         display_image_with_fallback(img, caption=img.get('name', 'Image'), show_source=True)
                         
                         # Selection checkbox
-                        img_id = img.get('id') or img.get('file_id') or img.get('name')
+                        img_id_for_key = img.get('id') or img.get('file_id') or img.get('name') or f'unknown_{i}'
                         is_selected = img in st.session_state.get('selected_library_images', [])
                         
-                        if st.checkbox(f"Select", key=f"lib_folder_{folder_name}_{img_id}", value=is_selected):
+                        # Use a unique key for each checkbox
+                        if st.checkbox(f"Select", key=f"lib_folder_{folder_name}_{img_id_for_key}", value=is_selected):
                             if img not in st.session_state.selected_library_images:
+                                # Store normalized version to ensure consistency
                                 st.session_state.selected_library_images.append(normalize_image_urls(img))
                         else:
                             if img in st.session_state.selected_library_images:
@@ -2984,9 +2916,18 @@ def display_library_page():
                         metadata_html += f"<span style='background:#6c757d;color:white;padding:4px 8px;border-radius:4px;font-size:11px;margin-right:6px;'>📁 {image_data.get('folder_name')}</span>"
                     
                     if image_data.get('size'):
-                        size_mb = int(image_data['size']) / (1024*1024)
-                        metadata_html += f"<span style='background:#17a2b8;color:white;padding:4px 8px;border-radius:4px;font-size:11px;margin-right:6px;'>💾 {size_mb:.2f} MB</span>"
-                    
+                        try:
+                            size_bytes = int(image_data['size'])
+                            if size_bytes >= 1024 * 1024:
+                                size_str = f"{size_bytes / (1024*1024):.2f} MB"
+                            elif size_bytes >= 1024:
+                                size_str = f"{size_bytes / 1024:.1f} KB"
+                            else:
+                                size_str = f"{size_bytes} B"
+                            metadata_html += f"<span style='background:#17a2b8;color:white;padding:4px 8px;border-radius:4px;font-size:11px;margin-right:6px;'>💾 {size_str}</span>"
+                        except (ValueError, TypeError):
+                            pass
+
                     if image_data.get('createdTime'):
                         try:
                             created_dt_str = image_data['createdTime']
@@ -3033,6 +2974,38 @@ def display_library_page():
     else:  # Grid view (default)
         display_image_grid(filtered_images, columns=4, show_metadata=True, show_actions=True)
     
+    # Action bar for selected library images
+    if st.session_state.selected_library_images:
+        st.markdown("---")
+        st.markdown("### Selected Library Images")
+        sel_preview_cols = st.columns(min(6, len(st.session_state.selected_library_images)))
+        for i, sel_img in enumerate(st.session_state.selected_library_images[:6]):
+            with sel_preview_cols[i]:
+                normalized_sel_img = normalize_image_urls(sel_img)
+                display_image_with_fallback(normalized_sel_img, caption=f"#{i+1}", show_source=False, width=80)
+        if len(st.session_state.selected_library_images) > 6:
+            st.info(f"... and {len(st.session_state.selected_library_images) - 6} more")
+
+        act_col1, act_col2, act_col3 = st.columns([1,1,4])
+        with act_col1:
+            if st.button("Qwen Edit Selected", use_container_width=True):
+                if st.session_state.selected_library_images:
+                    st.session_state.selected_image_for_edit = st.session_state.selected_library_images[0] # Take the first selected
+                    st.session_state.edit_mode = 'qwen'
+                    st.session_state.current_page = "Generate"
+                    st.rerun()
+        with act_col2:
+            if st.button("Seedream Selected", use_container_width=True):
+                if st.session_state.selected_library_images:
+                    st.session_state.selected_image_for_edit = st.session_state.selected_library_images[0] # Take the first selected
+                    st.session_state.edit_mode = 'seedream'
+                    st.session_state.current_page = "Generate"
+                    st.rerun()
+        with act_col3:
+            if st.button("Clear Library Selection", use_container_width=True):
+                st.session_state.selected_library_images = []
+                st.rerun()
+
     st.markdown("---")
     st.markdown("### 📊 Library Statistics")
     stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
@@ -3079,6 +3052,9 @@ def display_error_with_help(error_message):
            - The API endpoint may be temporarily unreachable.
            - Your network might be blocking the API domain.
            - Try using a different network connection if possible.
+           
+        5. **Quota Exceeded:**
+           - Your account may have reached its generation or upload quota. Check your API provider's dashboard.
         
         **Current Configuration:**
         - Primary Endpoint: `{API_BASE_URL}`
