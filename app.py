@@ -2919,4 +2919,3 @@ elif st.session_state.current_page == "History":
     display_history_page()
 elif st.session_state.current_page == "Library":
     display_library_page()
-\`\`\`
