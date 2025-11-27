@@ -754,8 +754,14 @@ def upload_to_gdrive(image_url: str, file_name: str, task_id: str = None):
         st.error(f"Error uploading to Google Drive: {str(e)}")
         return None
 
-def list_gdrive_images(folder_id: Optional[str] = None):
-    """List all images in Google Drive folder."""
+def list_gdrive_images(folder_id: Optional[str] = None, fetch_all: bool = True):
+    """
+    List all images in Google Drive folder with pagination support.
+    
+    Args:
+        folder_id: The folder ID to fetch from. If None, uses default app folder.
+        fetch_all: If True, fetches all images using pagination. If False, limits to 200.
+    """
     if not st.session_state.service:
         return []
     
@@ -763,18 +769,41 @@ def list_gdrive_images(folder_id: Optional[str] = None):
         if not folder_id:
             folder_id = st.session_state.gdrive_folder_id or create_app_folder()
         
-        results = st.session_state.service.files().list(
-            q=f"'{folder_id}' in parents and trashed=false and (mimeType contains 'image')",
-            spaces='drive',
-            fields='files(id, name, webContentLink, webViewLink, createdTime, size, mimeType, thumbnailLink, description)',
-            pageSize=200,
-            orderBy='createdTime desc'
-        ).execute()
+        all_files = []
+        page_token = None
+        page_count = 0
         
-        files = results.get('files', [])
+        while True:
+            page_count += 1
+            print(f"[v0] Fetching page {page_count} of images from Drive...")
+            
+            query_params = {
+                'q': f"'{folder_id}' in parents and trashed=false and (mimeType contains 'image')",
+                'spaces': 'drive',
+                'fields': 'nextPageToken, files(id, name, webContentLink, webViewLink, createdTime, size, mimeType, thumbnailLink, description)',
+                'pageSize': 1000,  # Max allowed by API
+                'orderBy': 'createdTime desc'
+            }
+            
+            if page_token:
+                query_params['pageToken'] = page_token
+            
+            results = st.session_state.service.files().list(**query_params).execute()
+            
+            files = results.get('files', [])
+            all_files.extend(files)
+            
+            print(f"[v0] Page {page_count}: Found {len(files)} images (Total so far: {len(all_files)})")
+            
+            page_token = results.get('nextPageToken')
+            
+            if not page_token or not fetch_all:
+                break
+        
+        print(f"[v0] Completed fetching {len(all_files)} total images from {page_count} page(s)")
         
         processed_files = []
-        for file in files:
+        for file in all_files:
             file_id = file['id']
             
             original_url = None
@@ -807,6 +836,7 @@ def list_gdrive_images(folder_id: Optional[str] = None):
         
     except Exception as e:
         st.error(f"Error listing images: {str(e)}")
+        print(f"[v0] Error in list_gdrive_images: {str(e)}")
         return []
 
 def delete_gdrive_file(file_id: str):
@@ -1998,45 +2028,143 @@ def display_history_page():
             
         st.markdown("</div>", unsafe_allow_html=True)
 
-def display_library_page():
-    st.title("📚 Image Library")
+def load_complete_library():
+    """Load all images from both authenticated Drive storage and public folders."""
+    all_library_images = []
     
-    if not st.session_state.authenticated:
-        st.warning("Please connect Google Drive in the sidebar to use the library feature.")
-        return
+    # Part 1: Get images from authenticated Google Drive (uploaded generations)
+    if st.session_state.service and st.session_state.gdrive_folder_id:
+        with st.spinner("📥 Loading images from your Google Drive storage..."):
+            drive_images = list_gdrive_images(fetch_all=True)
+            if drive_images:
+                all_library_images.extend(drive_images)
+                st.success(f"✓ Loaded {len(drive_images)} images from your Drive storage")
+    
+    # Part 2: Get images from all saved public folders
+    with st.spinner("📂 Loading images from saved public folders..."):
+        public_folder_images = list_all_drive_folders_images()
+        if public_folder_images:
+            all_library_images.extend(public_folder_images)
+            st.success(f"✓ Loaded {len(public_folder_images)} images from {len(st.session_state.saved_folders)} public folder(s)")
+    
+    # Remove duplicates based on file_id or url
+    seen_ids = set()
+    unique_images = []
+    for img in all_library_images:
+        img_id = img.get('file_id') or img.get('id') or img.get('url')
+        if img_id and img_id not in seen_ids:
+            seen_ids.add(img_id)
+            unique_images.append(img)
+    
+    print(f"[v0] Total unique images in library: {len(unique_images)}")
+    return unique_images
+
+def list_all_drive_folders_images():
+    """Fetch images from all saved folders (public folders via scraping)."""
+    all_images = []
+    
+    print(f"[v0] Fetching images from {len(st.session_state.saved_folders)} saved folders...")
+    
+    for folder_name, folder_url in st.session_state.saved_folders.items():
+        try:
+            folder_id = extract_folder_id(folder_url)
+            print(f"[v0] Loading images from '{folder_name}' (ID: {folder_id})")
+            
+            # Get images from public folder
+            folder_images = get_gdrive_image_urls(folder_id, folder_name)
+            
+            if folder_images:
+                print(f"[v0] Found {len(folder_images)} images in '{folder_name}'")
+                all_images.extend(folder_images)
+            else:
+                print(f"[v0] No images found in '{folder_name}'")
+                
+        except Exception as e:
+            print(f"[v0] Error loading folder '{folder_name}': {str(e)}")
+            st.warning(f"Could not load images from '{folder_name}': {str(e)}")
+    
+    print(f"[v0] Total images loaded from all folders: {len(all_images)}")
+    return all_images
+
+def display_library_page():
+    st.title("📚 Complete Image Library")
     
     # Header with stats and controls
-    col1, col2, col3 = st.columns([2, 1, 1])
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     with col1:
-        st.markdown(f"### {len(st.session_state.library_images)} images in library")
+        total_images = len(st.session_state.library_images)
+        st.markdown(f"### {total_images:,} images total")
     with col2:
         view_mode = st.selectbox("View", ["By Folder", "All Images", "Grid"], key="library_view_mode")
     with col3:
-        if st.button("🔄 Refresh Library", use_container_width=True):
-            with st.spinner("Refreshing..."):
-                st.session_state.library_images = list_gdrive_images()
-            st.success("Library refreshed!")
+        sort_by = st.selectbox("Sort", ["Newest First", "Oldest First", "Name A-Z", "Size"], key="library_sort")
+    with col4:
+        if st.button("🔄 Refresh All", use_container_width=True):
+            with st.spinner("Refreshing complete library..."):
+                st.session_state.library_images = load_complete_library()
+            st.success(f"Library refreshed! {len(st.session_state.library_images):,} images loaded")
             st.rerun()
     
     if not st.session_state.library_images:
-        st.info("Your library is empty. Generate and upload some images to get started!")
+        with st.spinner("Loading complete library..."):
+            st.session_state.library_images = load_complete_library()
+        if st.session_state.library_images:
+            st.success(f"Loaded {len(st.session_state.library_images):,} images!")
+            st.rerun()
+    
+    if not st.session_state.library_images:
+        st.info("📭 Your library is empty. Add images by:\n- Loading from saved public folders\n- Generating and uploading new images\n- Connecting Google Drive to access uploaded images")
         return
+    
+    sorted_images = st.session_state.library_images.copy()
+    if sort_by == "Newest First":
+        sorted_images.sort(key=lambda x: x.get('createdTime', ''), reverse=True)
+    elif sort_by == "Oldest First":
+        sorted_images.sort(key=lambda x: x.get('createdTime', ''))
+    elif sort_by == "Name A-Z":
+        sorted_images.sort(key=lambda x: x.get('name', ''))
+    elif sort_by == "Size":
+        sorted_images.sort(key=lambda x: int(x.get('size', 0)), reverse=True)
+    
+    # Search and filter section
+    st.markdown("---")
+    search_col, filter_col = st.columns([3, 1])
+    with search_col:
+        search_query = st.text_input("🔍 Search images by name", value="", key="lib_search")
+    with filter_col:
+        source_filter = st.selectbox("Filter by source", ["All", "Drive Storage", "Public Folders"], key="lib_filter")
+    
+    filtered_images = sorted_images
+    if search_query:
+        filtered_images = [img for img in filtered_images if search_query.lower() in img.get('name', '').lower()]
+    
+    if source_filter == "Drive Storage":
+        filtered_images = [img for img in filtered_images if img.get('folder_id') == st.session_state.gdrive_folder_id]
+    elif source_filter == "Public Folders":
+        filtered_images = [img for img in filtered_images if img.get('folder_id') != st.session_state.gdrive_folder_id]
+    
+    st.markdown(f"**Showing {len(filtered_images):,} of {total_images:,} images**")
     
     # Display options
     st.markdown("---")
     
     if view_mode == "By Folder":
-        # Organize images by folder
-        folders_dict = organize_images_by_folder(st.session_state.library_images)
+        folders_dict = organize_images_by_folder(filtered_images)
+        
+        st.markdown(f"### 📂 {len(folders_dict)} Folders")
         
         for folder_name, folder_images in folders_dict.items():
-            with st.expander(f"📁 {folder_name} ({len(folder_images)} images)", expanded=True):
+            folder_size = sum(int(img.get('size', 0)) for img in folder_images if img.get('size'))
+            folder_size_mb = folder_size / (1024*1024) if folder_size > 0 else 0
+            
+            with st.expander(f"📁 **{folder_name}** ({len(folder_images)} images, {folder_size_mb:.1f} MB)", expanded=True):
                 st.markdown(f"""
                     <div style='background:#e3f2fd;padding:12px;border-radius:8px;margin-bottom:16px;'>
                         <div style='font-size:13px;color:#1565c0;'>
                             <strong>Folder:</strong> {folder_name}<br>
                             <strong>Images:</strong> {len(folder_images)}<br>
-                            <strong>Total Size:</strong> {sum(int(img.get('size', 0)) for img in folder_images if img.get('size')) / (1024*1024):.2f} MB
+                            <strong>Total Size:</strong> {folder_size_mb:.2f} MB<br>
+                            <strong>Source:</strong> {'Google Drive Storage' if folder_images[0].get('folder_id') == st.session_state.gdrive_folder_id else 'Public Folder'}
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
@@ -2045,7 +2173,7 @@ def display_library_page():
     
     elif view_mode == "All Images":
         # List view with detailed URLs
-        for idx, image_data in enumerate(st.session_state.library_images):
+        for idx, image_data in enumerate(filtered_images):
             with st.container():
                 st.markdown(f"---")
                 
@@ -2104,25 +2232,39 @@ def display_library_page():
                             st.rerun()
                     
                     with act_col3:
-                        if st.button("🌐 Open in Drive", key=f"lib_open_{idx}", use_container_width=True):
-                            if image_data.get('webViewLink'):
-                                st.markdown(f"[Open in Google Drive]({image_data['webViewLink']})", unsafe_allow_html=True)
-                            else:
-                                st.warning("No Drive link available")
+                        download_url = image_data.get('drive_direct_link') or image_data.get('url')
+                        if download_url:
+                            st.markdown(f"[⬇️ Download]({download_url})", unsafe_allow_html=True)
     
     else:  # Grid view
-        display_image_grid(st.session_state.library_images, columns=3, show_metadata=True, show_actions=True)
+        display_image_grid(filtered_images, columns=4, show_metadata=True, show_actions=True)
+    
+    st.markdown("---")
+    st.markdown("### 📊 Library Statistics")
+    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+    
+    with stat_col1:
+        st.metric("Total Images", f"{len(filtered_images):,}")
+    with stat_col2:
+        folders_count = len(organize_images_by_folder(filtered_images))
+        st.metric("Folders", folders_count)
+    with stat_col3:
+        total_size = sum(int(img.get('size', 0)) for img in filtered_images if img.get('size'))
+        total_size_mb = total_size / (1024*1024) if total_size > 0 else 0
+        st.metric("Total Size", f"{total_size_mb:.1f} MB")
+    with stat_col4:
+        avg_size = total_size_mb / len(filtered_images) if filtered_images else 0
+        st.metric("Avg Size", f"{avg_size:.2f} MB")
 
 # ============================================================================
 # Main Page Router
 # ============================================================================
+# </CHANGE> Fixed duplicate lines causing syntax error
 if st.session_state.current_page == "Slideshow":
-    render_slideshow_page() # Changed from display_slideshow_page
+    render_slideshow_page()
 elif st.session_state.current_page == "Generate":
     display_generate_page()
 elif st.session_state.current_page == "History":
     display_history_page()
 elif st.session_state.current_page == "Library":
     display_library_page()
-_history_page()
-
