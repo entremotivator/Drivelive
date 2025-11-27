@@ -723,6 +723,46 @@ def get_best_streamlit_url(image_data):
     
     return None
 
+def get_api_compatible_url(image_data):
+    """
+    Get the best URL for API access (not just Streamlit display).
+    APIs need publicly accessible URLs that they can download from.
+    Priority: drive_public_url > original_generation_url > webContentLink > direct fallback
+    """
+    if not image_data:
+        return None
+    
+    # Try in order of API compatibility and public accessibility
+    url_priority = [
+        # Google Drive public export URL (best for API access)
+        image_data.get('drive_public_url'),
+        image_data.get('public_image_url'),
+        # Original generation URL (if from AI generation, already public)
+        image_data.get('original_generation_url'),
+        image_data.get('original_url'),
+        # Drive webContentLink (direct download link)
+        image_data.get('webContentLink'),
+        # Fallback to any URL field
+        image_data.get('url'),
+    ]
+    
+    for url in url_priority:
+        if url and url.startswith('http'):
+            # Ensure we're not sending CDN links that APIs can't access
+            if 'lh3.googleusercontent.com' in url:
+                # Try to convert to public URL if we have file_id
+                file_id = image_data.get('file_id') or image_data.get('id')
+                if file_id:
+                    return f"https://drive.google.com/uc?export=view&id={file_id}"
+            return url
+    
+    # Last resort: construct from file_id
+    file_id = image_data.get('file_id') or image_data.get('id')
+    if file_id:
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    
+    return None
+
 
 def extract_folder_id(url: str):
     """Extract folder ID from various Google Drive URL formats"""
@@ -2508,19 +2548,24 @@ def display_generate_page():
         # Clear all selections button
         if st.button("Clear All Selections"):
             clear_all_selections()
+            st.success("All selections cleared!")
             st.rerun()
-
-    # API Key check
-    if not st.session_state.api_key:
-        st.error("Please configure your API Key in the sidebar to start generating images.")
-        return
-
-    tab1, tab2, tab3 = st.tabs(["Text-to-Image", "Image Edit (Qwen)", "Image Edit (Seedream)"])
-
-    with tab1:
-        st.header("Text-to-Image Generation")
+    
+    st.divider()
+    
+    # Generation Mode Selection
+    gen_mode = st.radio(
+        "Select Generation Mode",
+        ["Text-to-Image", "Image Edit (Qwen)", "Image Edit (Seedream)"],
+        horizontal=True,
+        key="generation_mode"
+    )
+    
+    if gen_mode == "Text-to-Image":
+        st.header("✨ Text-to-Image Generation")
+        st.info("Generate images from text descriptions")
         
-        with st.form("text_to_image_form"):
+        with st.form("txt2img_form"):
             prompt = st.text_area("Prompt", "A photorealistic image of a majestic lion wearing a crown, digital art, highly detailed")
             negative_prompt = st.text_area("Negative Prompt (Optional)", "blurry, low quality, bad anatomy, deformed")
             
@@ -2566,77 +2611,72 @@ def display_generate_page():
                 else:
                     display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
 
-    with tab2:
+    elif gen_mode == "Image Edit (Qwen)":
         st.header("✏️ Image Edit - Qwen Model")
         st.info("Edit images using AI-powered Qwen model")
         
         default_qwen_url = "https://file.aiquickdraw.com/custom-page/akr/section-images/1755603225969i6j87xnw.jpg"
         selected_image_data = None
-        image_url_input = default_qwen_url # Default value for input field
+        image_url_input = default_qwen_url
 
-        # Prioritize image selected from Slideshow page
-        if st.session_state.selected_slideshow_images:
-            selected_image_data = st.session_state.selected_slideshow_images[0]
-            image_url_input = get_best_streamlit_url(selected_image_data) or default_qwen_url
-        # Then prioritize image selected for edit (e.g. from Library)
+        # Prioritize image selected from Slideshow page or master selection
+        if all_selected:
+            selected_image_data = all_selected[0]
+            # Use API-compatible URL for generation (not Streamlit display URL)
+            api_url = get_api_compatible_url(selected_image_data)
+            if api_url:
+                image_url_input = api_url
+            else:
+                st.warning("Selected image may not have a publicly accessible URL. Using default.")
+                image_url_input = default_qwen_url
         elif st.session_state.selected_image_for_edit:
             selected_image_data = st.session_state.selected_image_for_edit
-            image_url_input = get_best_streamlit_url(selected_image_data) or default_qwen_url
+            api_url = get_api_compatible_url(selected_image_data)
+            if api_url:
+                image_url_input = api_url
+            else:
+                image_url_input = default_qwen_url
             
         with st.form("qwen_image_edit_form"):
             prompt = st.text_area("Prompt", "Make the image more vibrant and colorful, add a subtle glow")
             negative_prompt = st.text_area("Negative Prompt (Optional)", "blurry, ugly, low quality, distorted")
             
-            # If image is selected from Slideshow, display it and allow choosing from selection
-            if st.session_state.selected_slideshow_images:
+            # If image is selected, display it and allow choosing from selection
+            if all_selected:
                 image_to_edit_display = selected_image_data
-                st.success(f"Using image from selection: {st.session_state.selected_slideshow_images[0].get('name', 'Unknown')}")
+                st.success(f"Using image from selection: {selected_image_data.get('name', 'Unknown')}")
                 
-                # Allow selecting a different image from the slideshow selection
-                if len(st.session_state.selected_slideshow_images) > 1:
-                    # Create a mapping of display names to indices for the selectbox
+                # Allow selecting a different image from the selection
+                if len(all_selected) > 1:
                     image_options = {f"Image {i+1}: {img.get('name', 'Unknown')[:30]}": i 
-                                    for i, img in enumerate(st.session_state.selected_slideshow_images)}
+                                    for i, img in enumerate(all_selected)}
                     selected_idx_name = st.selectbox("Choose image to edit", options=list(image_options.keys()), key="qwen_img_select_from_list")
                     selected_index = image_options[selected_idx_name]
-                    image_to_edit_display = st.session_state.selected_slideshow_images[selected_index]
-                    image_url_input = get_best_streamlit_url(image_to_edit_display) or default_qwen_url
+                    image_to_edit_display = all_selected[selected_index]
+                    # Update API URL for the selected image
+                    api_url = get_api_compatible_url(image_to_edit_display)
+                    image_url_input = api_url if api_url else default_qwen_url
                 
-                # Show preview of the selected image for editing
+                # Show preview of the selected image for editing (use Streamlit-optimized URL for display)
                 display_image_with_fallback(image_to_edit_display, caption="Image to Edit", show_source=True, width=300)
                 
-            # If no slideshow image selected, offer library or manual URL
-            else:
-                use_library_image = False
-                # Only show library option if authenticated and library has images
-                if st.session_state.gdrive_authenticated and st.session_state.library_images:
-                    # Check if an image was selected for edit from library previously
-                    use_library_image = st.checkbox("Use image from library", value=bool(st.session_state.selected_image_for_edit), key="qwen_lib_check")
+                # Show the API URL that will be sent (for debugging)
+                with st.expander("🔗 API URL (for debugging)"):
+                    st.code(image_url_input, language="text")
+                    st.caption("This is the URL that will be sent to the AI API")
                 
-                if use_library_image:
-                    library_options = {img.get('name', f"Image {i}"): img for i, img in enumerate(st.session_state.library_images) if img.get('name')}
-                    
-                    if library_options:
-                        selected_name = st.selectbox("Select Image", options=list(library_options.keys()), key="qwen_lib_select")
-                        selected_img_data = library_options[selected_name]
-                        selected_img_data = normalize_image_urls(selected_img_data) # Normalize for display
-                        image_url_input = get_best_streamlit_url(selected_img_data) or default_qwen_url
-                        # Display preview from library
-                        display_image_with_fallback(selected_img_data, caption=selected_name, show_source=True, width=200)
-                    else:
-                        st.warning("No images found in library.")
-                        image_url_input = st.text_input("Image URL", default_qwen_url, key="qwen_url_input_fallback")
-                else:
-                    # Manual URL input
-                    image_url_input = st.text_input("Image URL", image_url_input, key="qwen_url_input")
-                    st.caption("💡 Or select images from Slideshow page first, or use the library option")
-
-            col1, col2, col3 = st.columns(3)
+            # If no slideshow image selected, offer manual URL
+            else:
+                use_manual_url = st.checkbox("Use manual URL input", value=False, key="qwen_manual_url")
+                if use_manual_url:
+                    image_url_input = st.text_input("Image URL", value=image_url_input, key="qwen_url_input")
+                    st.caption("⚠️ Make sure the URL is publicly accessible")
+            
+            col1, col2 = st.columns(2)
             with col1:
-                image_size = st.selectbox("Image Size", ["square", "square_hd", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"], index=1)
+                image_size = st.selectbox("Image Size", ["1024x1024", "512x512", "768x768"], key="qwen_size")
+                num_steps = st.slider("Inference Steps", 1, 50, 20, key="qwen_steps")
             with col2:
-                num_steps = st.slider("Inference Steps", 2, 49, 25)
-            with col3:
                 guidance_scale = st.slider("Guidance Scale", 0.0, 20.0, 4.0)
             
             submitted = st.form_submit_button("Edit Image (Qwen)")
@@ -2647,21 +2687,23 @@ def display_generate_page():
                 else:
                     input_params = {
                         "prompt": prompt,
-                        "image_url": image_url_input,
+                        "image_url": image_url_input,  # Now using API-compatible URL
                         "negative_prompt": negative_prompt,
                         "image_size": image_size,
                         "num_inference_steps": num_steps,
                         "guidance_scale": guidance_scale,
                         "enable_safety_checker": True,
-                        "output_format": "png" # Assuming PNG is default/preferred
+                        "output_format": "png"
                     }
+                    
+                    print(f"[v0] Sending image URL to API: {image_url_input}")
                     
                     with st.spinner("Creating edit task..."):
                         result = create_task(st.session_state.api_key, "qwen/image-edit", input_params)
                     
                     if result["success"]:
                         task_id = result["task_id"]
-                        st.success(f"Task created successfully. Task ID: `{task_id}`")
+                        st.success(f"✅ Task created successfully. Task ID: `{task_id}`")
                         
                         # Add task to history
                         st.session_state.task_history.insert(0, {
@@ -2673,97 +2715,95 @@ def display_generate_page():
                             "results": []
                         })
                         st.session_state.current_task = task_id
-                        # Clear selected image for edit after task creation
                         st.session_state.selected_image_for_edit = None
                         st.session_state.edit_mode = None
                         st.rerun()
                     else:
-                        display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
-
-    with tab3:
-        st.header("✨ Image Edit - Seedream Model")
-        st.info("Advanced image editing with Seedream AI")
+                        st.error(f"❌ Failed to create task: {result['error']}")
+    
+    elif gen_mode == "Image Edit (Seedream)":
+        st.header("✏️ Image Edit - Seedream Model")
+        st.info("Edit images using Seedream V4 model")
         
         default_seedream_url = "https://file.aiquickdraw.com/custom-page/akr/section-images/1755603225969i6j87xnw.jpg"
         selected_image_data = None
         image_url_input = default_seedream_url
-        
-        # Prioritize image selected from Slideshow page
-        if st.session_state.selected_slideshow_images:
-            selected_image_data = st.session_state.selected_slideshow_images[0]
-            image_url_input = get_best_streamlit_url(selected_image_data) or default_seedream_url
-        # Then prioritize image selected for edit (e.g. from Library)
+
+        # Prioritize image selected from master selection
+        if all_selected:
+            selected_image_data = all_selected[0]
+            api_url = get_api_compatible_url(selected_image_data)
+            if api_url:
+                image_url_input = api_url
+            else:
+                st.warning("Selected image may not have a publicly accessible URL. Using default.")
+                image_url_input = default_seedream_url
         elif st.session_state.selected_image_for_edit:
             selected_image_data = st.session_state.selected_image_for_edit
-            image_url_input = get_best_streamlit_url(selected_image_data) or default_seedream_url
-            
+            api_url = get_api_compatible_url(selected_image_data)
+            if api_url:
+                image_url_input = api_url
+            else:
+                image_url_input = default_seedream_url
+        
         with st.form("seedream_image_edit_form"):
-            prompt = st.text_area("Prompt", "Transform the image with dramatic lighting and enhanced details")
-            negative_prompt = st.text_area("Negative Prompt (Optional)", "blurry, distorted, low quality")
+            prompt = st.text_area("Prompt", "Enhance the image quality, improve lighting and colors")
+            negative_prompt = st.text_area("Negative Prompt (Optional)", "low quality, blurry, distorted")
             
-            # If image is selected from Slideshow, display it and allow choosing from selection
-            if st.session_state.selected_slideshow_images:
+            # If image is selected, display it and allow choosing
+            if all_selected:
                 image_to_edit_display = selected_image_data
-                st.success(f"Using image from selection: {st.session_state.selected_slideshow_images[0].get('name', 'Unknown')}")
-
-                if len(st.session_state.selected_slideshow_images) > 1:
+                st.success(f"Using image from selection: {selected_image_data.get('name', 'Unknown')}")
+                
+                if len(all_selected) > 1:
                     image_options = {f"Image {i+1}: {img.get('name', 'Unknown')[:30]}": i 
-                                    for i, img in enumerate(st.session_state.selected_slideshow_images)}
-                    selected_idx_name = st.selectbox("Choose image to edit", options=list(image_options.keys()), key="seedream_img_select_from_list")
+                                    for i, img in enumerate(all_selected)}
+                    selected_idx_name = st.selectbox("Choose image to edit", options=list(image_options.keys()), key="seedream_img_select")
                     selected_index = image_options[selected_idx_name]
-                    image_to_edit_display = st.session_state.selected_slideshow_images[selected_index]
-                    image_url_input = get_best_streamlit_url(image_to_edit_display) or default_seedream_url
+                    image_to_edit_display = all_selected[selected_index]
+                    api_url = get_api_compatible_url(image_to_edit_display)
+                    image_url_input = api_url if api_url else default_seedream_url
                 
                 display_image_with_fallback(image_to_edit_display, caption="Image to Edit", show_source=True, width=300)
                 
-            # If no slideshow image selected, offer library or manual URL
+                # Show the API URL that will be sent
+                with st.expander("🔗 API URL (for debugging)"):
+                    st.code(image_url_input, language="text")
+                    st.caption("This is the URL that will be sent to the AI API")
             else:
-                use_library_image = False
-                if st.session_state.gdrive_authenticated and st.session_state.library_images:
-                    use_library_image = st.checkbox("Use image from library", value=bool(st.session_state.selected_image_for_edit), key="seedream_lib_check")
-                
-                if use_library_image:
-                    library_options = {img.get('name', f"Image {i}"): img for i, img in enumerate(st.session_state.library_images) if img.get('name')}
-                    
-                    if library_options:
-                        selected_name = st.selectbox("Select Image", options=list(library_options.keys()), key="seedream_lib_select")
-                        selected_img_data = library_options[selected_name]
-                        selected_img_data = normalize_image_urls(selected_img_data)
-                        image_url_input = get_best_streamlit_url(selected_img_data) or default_seedream_url
-                        display_image_with_fallback(selected_img_data, caption=selected_name, show_source=True, width=200)
-                    else:
-                        st.warning("No images found in library.")
-                        image_url_input = st.text_input("Image URL", default_seedream_url, key="seedream_url_input_fallback")
-                else:
-                    image_url_input = st.text_input("Image URL", image_url_input, key="seedream_url_input")
-                    st.caption("💡 Or select images from Slideshow page first, or use the library option")
-
+                use_manual_url = st.checkbox("Use manual URL input", value=False, key="seedream_manual_url")
+                if use_manual_url:
+                    image_url_input = st.text_input("Image URL", value=image_url_input, key="seedream_url_input")
+                    st.caption("⚠️ Make sure the URL is publicly accessible")
+            
             col1, col2 = st.columns(2)
             with col1:
-                image_size = st.selectbox("Image Size", ["square", "square_hd", "portrait_4_3", "landscape_4_3"], index=1, key="seedream_size")
+                image_size = st.selectbox("Image Size", ["1024x1024", "512x512", "768x768"], key="seedream_size")
             with col2:
-                image_resolution = st.selectbox("Image Resolution", ["1K", "2K", "4K"], index=0, key="seedream_res")
+                image_resolution = st.selectbox("Resolution", ["1024x1024", "2048x2048"], key="seedream_res")
             
             submitted = st.form_submit_button("Edit Image (Seedream)")
             
             if submitted:
                 if not image_url_input:
-                    st.error("Please provide an image URL or select an image from the library/selection.")
+                    st.error("Please provide an image URL or select an image.")
                 else:
                     input_params = {
                         "prompt": prompt,
-                        "image_url": image_url_input,
+                        "image_url": image_url_input,  # Now using API-compatible URL
                         "negative_prompt": negative_prompt,
                         "image_size": image_size,
                         "image_resolution": image_resolution
                     }
+                    
+                    print(f"[v0] Sending image URL to Seedream API: {image_url_input}")
                     
                     with st.spinner("Creating edit task..."):
                         result = create_task(st.session_state.api_key, "seedream/image-edit-v4", input_params)
                     
                     if result["success"]:
                         task_id = result["task_id"]
-                        st.success(f"Task created successfully. Task ID: `{task_id}`")
+                        st.success(f"✅ Task created successfully. Task ID: `{task_id}`")
                         
                         st.session_state.task_history.insert(0, {
                             "id": task_id,
@@ -2774,12 +2814,13 @@ def display_generate_page():
                             "results": []
                         })
                         st.session_state.current_task = task_id
-                        st.session_state.selected_image_for_edit = None
-                        st.session_state.edit_mode = None
                         st.rerun()
                     else:
-                        display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
+                        st.error(f"❌ Failed to create task: {result['error']}")
 
+# ============================================================================
+# History Page
+# ============================================================================
 def display_history_page():
     """History page with selection capability."""
     st.title("📜 Task History")
