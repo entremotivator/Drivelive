@@ -400,23 +400,27 @@ def normalize_image_urls(image_data):
     Ensures consistent URL structure across all pages and selections.
     """
     if not image_data:
-        return image_data
+        return None
     
     # Ensure image_data is a dictionary
     if not isinstance(image_data, dict):
         # Attempt to convert if it's a string URL
         if isinstance(image_data, str) and image_data.startswith('http'):
-            image_data = {'url': image_data}
+            image_data = {'url': image_data, 'name': 'Unknown'}
         else:
-            return {} # Return empty if cannot process
+            return None  # Return None instead of empty dict
 
-    file_id = image_data.get('id') or image_data.get('file_id')
+    file_id = (
+        image_data.get('id') or 
+        image_data.get('file_id') or 
+        image_data.get('fileId')
+    )
     
     # Ensure we have a file_id stored
-    if file_id and 'file_id' not in image_data:
-        image_data['file_id'] = file_id
-    
     if file_id:
+        image_data['file_id'] = file_id
+        image_data['id'] = file_id  # Ensure both fields exist
+    
         # Generate all possible URL formats
         image_data['drive_direct_link'] = f"https://lh3.googleusercontent.com/d/{file_id}"
         image_data['drive_public_url'] = f"https://drive.google.com/uc?export=view&id={file_id}"
@@ -436,13 +440,23 @@ def normalize_image_urls(image_data):
     if image_data.get('original_generation_url') and not image_data.get('generation_source'):
         image_data['generation_source'] = 'ai_generated'
     
-    # Ensure basic URL fields exist if an image_data was provided
     if not image_data.get('url'):
-        image_data['url'] = image_data.get('original_generation_url') or image_data.get('original_url')
+        fallback_url = (
+            image_data.get('original_generation_url') or 
+            image_data.get('original_url') or
+            image_data.get('webContentLink') or
+            image_data.get('thumbnailLink')
+        )
+        if fallback_url:
+            image_data['url'] = fallback_url
     
-    # Fallback for name if not present
     if not image_data.get('name'):
-        image_data['name'] = f"Image_{image_data.get('id', random.randint(1000, 9999))}"
+        name_fallback = (
+            image_data.get('title') or
+            (f"Image_{image_data.get('id', '')[:8]}" if image_data.get('id') else None) or
+            f"Image_{random.randint(1000, 9999)}"
+        )
+        image_data['name'] = name_fallback
 
     return image_data
 
@@ -744,10 +758,7 @@ def load_images_from_folder(folder_url):
                 "webViewLink": web_view_link,
                 "id": file_id,
                 "original_url": direct_cdn_url,
-                "original_generation_url": direct_cdn_url,
-                "size": 0,
-                "createdTime": "",
-                "modifiedTime": ""
+                "original_generation_url": direct_cdn_url
             }
             images.append(normalize_image_urls(image_data))
             valid_count += 1
@@ -768,7 +779,7 @@ def load_images_from_folder(folder_url):
                     st.markdown("---")
         else:
             st.warning("⚠️ No valid image IDs found in this folder.")
-            st.info("**Troubleshooting:**\n- Ensure the folder contains image files\n- Verify folder is shared publicly ('Anyone with the link can view')\n- Try a different folder")
+            st.info("Troubleshooting:\n- Ensure the folder contains image files\n- Verify folder is shared publicly ('Anyone with the link can view')\n- Try a different folder")
         
         return images
         
@@ -844,7 +855,6 @@ def get_gdrive_image_urls(folder_id: str, folder_name: str = None):
                         "original_url": direct_cdn_url,
                         "original_generation_url": direct_cdn_url
                     }
-                    # Normalize URLs upon creation
                     images.append(normalize_image_urls(image_data))
             
             # Method 2: 28-character file IDs (less common for images, but include)
@@ -952,7 +962,10 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
     
     # Ensure image data is normalized
     image_data = normalize_image_urls(image_data)
-    
+    if not image_data: # Check if normalization returned None
+        st.error("Invalid image data after normalization.")
+        return False
+
     urls_to_try = []
     
     # Priority 1: Direct CDN link (lh3.googleusercontent.com) - Best for Streamlit
@@ -1274,18 +1287,21 @@ def render_folder_manager():
                     with st.spinner("Loading images..."):
                         try:
                             folder_id = extract_folder_id(folder_url)
-                            gdrive_imgs = get_gdrive_image_urls(folder_id, folder_name) # Pass folder_name
-                            st.session_state.images = gdrive_imgs
-                            st.session_state.current_index = 0
-                            st.session_state.default_folder_url = folder_url
-                            st.session_state.show_folder_manager = False
-                            st.session_state.last_loaded_folder = folder_url # Track last loaded folder
-                            if gdrive_imgs:
-                                st.balloons()
-                                st.success(f"Loaded {len(gdrive_imgs)} images!")
-                                st.rerun()
+                            if folder_id:
+                                gdrive_imgs = get_gdrive_image_urls(folder_id, folder_name) # Pass folder_name
+                                st.session_state.images = gdrive_imgs
+                                st.session_state.current_index = 0
+                                st.session_state.default_folder_url = folder_url # Update default URL
+                                st.session_state.show_folder_manager = False
+                                st.session_state.last_loaded_folder = folder_url # Track last loaded folder
+                                if gdrive_imgs:
+                                    st.balloons()
+                                    st.success(f"Loaded {len(gdrive_imgs)} images!")
+                                    st.rerun()
+                                else:
+                                    st.error("No images found.")
                             else:
-                                st.error("No images found.")
+                                st.error("Invalid folder URL")
                         except Exception as e:
                             st.error(f"Error: {str(e)}")
             
@@ -1955,7 +1971,7 @@ def list_gdrive_images(folder_id=None, fetch_all=False):
 # Main Application Pages
 # ============================================================================
 def render_slideshow_page():
-    """Main slideshow page with Drive folder loading, image viewing, and selection."""
+    """Enhanced slideshow page with normalized image URLs and persistent selection."""
     st.markdown('<div class="page-header"><h1>📸 Drive Slideshow Viewer</h1></div>', unsafe_allow_html=True)
 
     # Folder selection dropdown at top
@@ -2043,12 +2059,45 @@ def render_slideshow_page():
 
     # Slideshow display section
     imgs = st.session_state.images
-    if not imgs:
-        st.info("👆 Load a folder to start viewing images")
+    
+    if not imgs or len(imgs) == 0:
+        st.info("No images loaded. Please enter a Google Drive folder URL above.")
         return
-
+    
+    # Ensure current_index is within valid range
+    if st.session_state.current_index >= len(imgs):
+        st.session_state.current_index = 0
+    elif st.session_state.current_index < 0:
+        st.session_state.current_index = 0
+    
     idx = st.session_state.current_index
     total = len(imgs)
+    
+    # Validate that current_item is a valid dictionary with normalization
+    if idx >= total:
+        st.error(f"Invalid image index: {idx} >= {total}")
+        st.session_state.current_index = 0
+        st.rerun()
+        return
+    
+    current_item = imgs[idx]
+    
+    if not current_item or not isinstance(current_item, dict):
+        st.error(f"Invalid image data at index {idx}")
+        # Try to fix by normalizing
+        if isinstance(current_item, str):
+            current_item = normalize_image_urls({'url': current_item, 'name': f'Image_{idx+1}'})
+            imgs[idx] = current_item # Update in place
+        else:
+            st.warning("Skipping invalid image...")
+            if idx + 1 < total:
+                st.session_state.current_index = idx + 1
+                st.rerun()
+            return
+    
+    # Normalize current item to ensure all URL fields are present
+    current_item = normalize_image_urls(current_item)
+    imgs[idx] = current_item  # Update in place
 
     selected_count = len(st.session_state.get('selected_slideshow_images', []))
 
@@ -2093,35 +2142,38 @@ def render_slideshow_page():
     # Main image display
     st.markdown('<div class="slideshow-container">', unsafe_allow_html=True)
     
-    current_item = imgs[idx]
-    
     st.markdown('<div class="image-frame">', unsafe_allow_html=True)
     display_image_with_fallback(current_item, caption="", show_source=False)
     st.markdown('</div>', unsafe_allow_html=True)
     
+    image_name = current_item.get("name") or current_item.get("title") or f"Image_{idx+1}"
+    
     # Image caption with slide counter
     st.markdown("""
     <div class="image-caption">
-        <span class="slide-counter">{idx+1} / {total}</span>
+        <span class="slide-counter">{idx} / {total}</span>
         <span>{name}</span>
     </div>
-    """.format(idx=idx, total=total, name=current_item.get("name", "Unknown")), unsafe_allow_html=True)
+    """.format(idx=idx+1, total=total, name=image_name), unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Selection controls
     st.markdown("### 🎯 Select for AI Generation")
     
-    # Check if current item is already selected
-    is_selected = any(img.get('id') == current_item.get('id') for img in st.session_state.get('selected_slideshow_images', []))
-    
+    current_id = current_item.get('id') or current_item.get('file_id') or idx
+    is_selected = any(
+        img.get('id') == current_id or img.get('file_id') == current_id 
+        for img in st.session_state.get('selected_slideshow_images', [])
+    )
+
     col1, col2 = st.columns([3, 2])
     with col1:
         if is_selected:
             if st.button("✓ Selected - Click to Remove", type="secondary", use_container_width=True):
                 st.session_state.selected_slideshow_images = [
                     img for img in st.session_state.get('selected_slideshow_images', [])
-                    if img.get('id') != current_item.get('id')
+                    if (img.get('id') != current_id and img.get('file_id') != current_id)
                 ]
                 st.rerun()
         else:
@@ -2177,7 +2229,7 @@ def render_slideshow_page():
         if st.button("⏯️ Play/Pause", use_container_width=True):
             st.session_state.autoplay = not st.session_state.autoplay
             st.rerun()
-    with nav_col4:
+    with col4: # Corrected column assignment for the last button
         if st.button("🗑️ Clear Selection", use_container_width=True, disabled=not st.session_state.selected_slideshow_images):
             st.session_state.selected_slideshow_images = []
             st.rerun()
