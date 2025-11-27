@@ -342,13 +342,14 @@ def init_session_state():
         'loop_mode': True,
         'current_page': 'Slideshow',
         'api_key': '',
-        'selected_images': [],  # Images selected for generation
+        'selected_images': [],  # Master list - all images selected across pages
         'selected_slideshow_images': [],  # Images selected from slideshow
         'selected_library_images': [],  # Images selected from library
+        'selected_history_images': [],  # Images selected from history
         'task_history': [],
         'library_images': [],
-        'library_view_mode': 'Grid',  # Default to Grid view
-        'library_sort_by': 'Newest First',  # Default sort order
+        'library_view_mode': 'Grid',  
+        'library_sort_by': 'Newest First',
         'saved_folders': {
             'Folder 1': 'https://drive.google.com/drive/folders/1fbHjKWNRleTk2giAQiCGR9s8V0VE14IO?usp=share_link',
             'Folder 2': 'https://drive.google.com/drive/folders/1vP6zhJVq68CnT0SVUS8dQALC7tOSrMqN?usp=share_link',
@@ -359,29 +360,34 @@ def init_session_state():
         'gdrive_folder_name': 'Generated Images',
         'auto_upload': False,
         'show_api_input': False,
-        'service_account_info': None, # Added for service account persistence
-        'credentials': None, # Added for service account persistence
-        'service': None, # Added for service account persistence
-        'polling_active': False, # For task polling
-        'current_task': None, # To track the task being polled
-        'stats': { # Initialize stats dictionary
+        'service_account_info': None,
+        'credentials': None,
+        'service': None,
+        'polling_active': False,
+        'current_task': None,
+        'stats': {
             'total_tasks': 0,
             'successful_tasks': 0,
             'failed_tasks': 0,
             'total_images': 0,
             'uploaded_images': 0
         },
-        'selected_image_for_edit': None, # Image selected for editing
-        'edit_mode': None, # Mode of editing (qwen, seedream)
-        'image_preview_cache': {},  # Cache normalized image data
-        'editing_folder': None, # State for editing folder name
-        'show_folder_manager': False, # State to toggle folder manager visibility
-        'last_loaded_folder': None,  # Track which folder was last loaded
-        'generation_preview_images': [],  # Images queued for generation with previews
-        'library_loaded': False, # Flag to ensure library is loaded only once
-        'all_library_images': [], # To store all loaded images for the library page
-        'library_source_filter': 'All', # For library filtering
-        'library_filter_type': 'All', # For library filtering (renamed for consistency)
+        'selected_image_for_edit': None,
+        'edit_mode': None,
+        'image_preview_cache': {},  # Cache normalized image data by ID
+        'url_cache': {},  # Cache best URLs by image ID
+        'editing_folder': None,
+        'show_folder_manager': False,
+        'last_loaded_folder': None,
+        'generation_preview_images': [],
+        'library_loaded': False,
+        'all_library_images': [],
+        'library_source_filter': 'All',
+        'library_filter_type': 'All',
+        'selection_metadata': {},  # Store metadata about when/where images were selected
+        'page_view_history': [],  # Track page navigation history
+        'last_selection_sync': None,  # Timestamp of last selection sync
+        'show_selection_breakdown': False, # Toggle for selection breakdown view
     }
     
     for key, value in defaults.items():
@@ -389,6 +395,236 @@ def init_session_state():
             st.session_state[key] = value
 
 init_session_state()
+
+# ============================================================================
+# Selection State Management Functions
+# ============================================================================
+
+def sync_master_selection():
+    """Sync all selection sources into master selected_images list."""
+    master_selection = []
+    seen_ids = set()
+    
+    # Combine from all sources
+    all_sources = [
+        ('slideshow', st.session_state.get('selected_slideshow_images', [])),
+        ('library', st.session_state.get('selected_library_images', [])),
+        ('history', st.session_state.get('selected_history_images', []))
+    ]
+    
+    for source_name, source_list in all_sources:
+        for img in source_list:
+            img_id = get_image_id(img)
+            if img_id not in seen_ids:
+                # Ensure image is normalized and cached
+                normalized = get_or_cache_normalized_image(img)
+                if normalized:
+                    # Add metadata about source
+                    if 'selection_source' not in normalized:
+                        normalized['selection_source'] = source_name
+                    master_selection.append(normalized)
+                    seen_ids.add(img_id)
+    
+    st.session_state.selected_images = master_selection
+    st.session_state.last_selection_sync = time.time()
+    return master_selection
+
+def get_image_id(img):
+    """Get unique ID for an image from various possible fields."""
+    if isinstance(img, dict):
+        return (
+            img.get('id') or 
+            img.get('file_id') or 
+            img.get('task_id') or
+            img.get('url') or
+            img.get('name') or
+            str(hash(str(img))) # Fallback hash for completely unknown objects
+        )
+    elif isinstance(img, str):
+        return img # If it's just a URL string
+    return str(hash(str(img))) # Fallback for non-dict/non-string types
+
+def get_or_cache_normalized_image(img):
+    """Get normalized image from cache or normalize and cache it."""
+    img_id = get_image_id(img)
+    
+    # Check cache first
+    if img_id in st.session_state.image_preview_cache:
+        cached = st.session_state.image_preview_cache[img_id]
+        # Verify cached data is still valid
+        if cached and isinstance(cached, dict) and cached.get('url'):
+            return cached
+    
+    # Normalize and cache
+    normalized = normalize_image_urls(img)
+    if normalized and isinstance(normalized, dict):
+        st.session_state.image_preview_cache[img_id] = normalized
+        # Also cache best URL
+        best_url = get_best_streamlit_url(normalized)
+        if best_url:
+            st.session_state.url_cache[img_id] = best_url
+        return normalized
+    
+    return None
+
+def add_to_selection(img, source='unknown'):
+    """Add image to appropriate selection list with validation."""
+    normalized = get_or_cache_normalized_image(img)
+    if not normalized:
+        return False
+    
+    # Add source tracking
+    normalized['selection_source'] = source
+    normalized['selection_time'] = time.time()
+    
+    img_id = get_image_id(normalized)
+    
+    # Add to appropriate source list
+    if source == 'slideshow':
+        target_list_key = 'selected_slideshow_images'
+    elif source == 'library':
+        target_list_key = 'selected_library_images'
+    elif source == 'history':
+        target_list_key = 'selected_history_images'
+    else:
+        target_list_key = 'selected_images' # Master list (shouldn't usually add directly)
+    
+    target_list = st.session_state.get(target_list_key, [])
+    
+    # Check if already in list
+    if not any(get_image_id(existing) == img_id for existing in target_list):
+        target_list.append(normalized)
+        st.session_state[target_list_key] = target_list
+        sync_master_selection()
+        return True
+    
+    return False
+
+def remove_from_selection(img, source='unknown'):
+    """Remove image from appropriate selection list."""
+    img_id = get_image_id(img)
+    
+    # Remove from appropriate source list
+    if source == 'slideshow':
+        target_list_key = 'selected_slideshow_images'
+    elif source == 'library':
+        target_list_key = 'selected_library_images'
+    elif source == 'history':
+        target_list_key = 'selected_history_images'
+    else:
+        target_list_key = 'selected_images' # Master list
+    
+    target_list = st.session_state.get(target_list_key, [])
+    
+    # Filter out the image to remove
+    st.session_state[target_list_key] = [img for img in target_list if get_image_id(img) != img_id]
+    
+    sync_master_selection()
+
+def is_image_selected(img, source=None):
+    """Check if image is selected in any list or specific source."""
+    img_id = get_image_id(img)
+    
+    if source:
+        if source == 'slideshow':
+            check_list = st.session_state.get('selected_slideshow_images', [])
+        elif source == 'library':
+            check_list = st.session_state.get('selected_library_images', [])
+        elif source == 'history':
+            check_list = st.session_state.get('selected_history_images', [])
+        else:
+            check_list = st.session_state.get('selected_images', []) # Check master list if source is general
+        
+        return any(get_image_id(existing) == img_id for existing in check_list)
+    else:
+        # Check all lists if no source specified
+        all_selected_in_master = st.session_state.get('selected_images', [])
+        return any(get_image_id(existing) == img_id for existing in all_selected_in_master)
+
+def get_total_selected_count():
+    """Get total number of unique selected images across all sources."""
+    sync_master_selection()
+    return len(st.session_state.get('selected_images', []))
+
+def clear_all_selections():
+    """Clear all image selections from all sources."""
+    st.session_state.selected_images = []
+    st.session_state.selected_slideshow_images = []
+    st.session_state.selected_library_images = []
+    st.session_state.selected_history_images = []
+    st.session_state.image_preview_cache = {} # Clear image cache
+    st.session_state.url_cache = {} # Clear URL cache
+    st.session_state.last_selection_sync = time.time()
+
+def render_selection_preview_banner():
+    """Render a persistent banner showing selected images across all pages."""
+    total_selected = get_total_selected_count()
+    
+    if total_selected == 0:
+        return
+    
+    # Dynamic class based on current page for styling context
+    current_page = st.session_state.current_page.lower()
+    banner_style = f"banner-{current_page}"
+
+    st.markdown(f"""
+    <div class='selection-banner {banner_style}' style='background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color:white;padding:16px;border-radius:12px;margin-bottom:20px;
+                box-shadow:0 4px 12px rgba(102,126,234,0.3);'>
+        <div style='display:flex;justify-content:space-between;align-items:center;'>
+            <div>
+                <h3 style='margin:0;font-size:18px;'>🎯 {total_selected} Image{'' if total_selected == 1 else 's'} Selected</h3>
+                <p style='margin:4px 0 0 0;opacity:0.9;font-size:14px;'>Ready for AI generation.</p>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Expandable preview
+    with st.expander(f"👁️ Preview All {total_selected} Selected Images", expanded=False):
+        selected_imgs = st.session_state.get('selected_images', [])
+        if selected_imgs:
+            cols = st.columns(min(6, len(selected_imgs)))
+            for i, img in enumerate(selected_imgs[:12]):  # Show max 12 in preview
+                with cols[i % 6]:
+                    # Use the cached normalized image if available
+                    cached_img = get_or_cache_normalized_image(img)
+                    if cached_img:
+                        display_image_with_fallback(cached_img, caption=f"#{i+1}", show_source=False, width=100)
+                        source = img.get('selection_source', 'unknown')
+                        st.caption(f"From: {source}")
+            
+            if len(selected_imgs) > 12:
+                st.info(f"... and {len(selected_imgs) - 12} more images")
+            
+            # Action buttons
+            action_cols = st.columns([2, 2, 1])
+            with action_cols[0]:
+                if st.button("➡️ Go to Generate Page", key="banner_goto_generate", use_container_width=True):
+                    st.session_state.current_page = "Generate"
+                    st.rerun()
+            with action_cols[1]:
+                if st.button("📋 View Breakdown", key="banner_breakdown", use_container_width=True):
+                    st.session_state.show_selection_breakdown = not st.session_state.get('show_selection_breakdown', False)
+                    st.rerun()
+            with action_cols[2]:
+                if st.button("🗑️ Clear All", key="banner_clear", use_container_width=True):
+                    clear_all_selections()
+                    st.rerun()
+            
+            # Show breakdown if toggled
+            if st.session_state.get('show_selection_breakdown', False):
+                st.markdown("#### 📊 Selection Breakdown")
+                breakdown_cols = st.columns(3)
+                with breakdown_cols[0]:
+                    slideshow_count = len(st.session_state.get('selected_slideshow_images', []))
+                    st.metric("From Slideshow", slideshow_count)
+                with breakdown_cols[1]:
+                    library_count = len(st.session_state.get('selected_library_images', []))
+                    st.metric("From Library", library_count)
+                with breakdown_cols[2]:
+                    history_count = len(st.session_state.get('selected_history_images', []))
+                    st.metric("From History", history_count)
 
 # ============================================================================
 # Utility Functions
@@ -420,7 +656,7 @@ def normalize_image_urls(image_data):
     if file_id:
         image_data['file_id'] = file_id
         image_data['id'] = file_id  # Ensure both fields exist
-    
+        
         # Generate all possible URL formats
         image_data['drive_direct_link'] = f"https://lh3.googleusercontent.com/d/{file_id}"
         image_data['drive_public_url'] = f"https://drive.google.com/uc?export=view&id={file_id}"
@@ -961,49 +1197,52 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
         return False
     
     # Ensure image data is normalized
-    image_data = normalize_image_urls(image_data)
-    if not image_data: # Check if normalization returned None
+    # Check cache first, otherwise normalize and cache
+    img_id = get_image_id(image_data)
+    normalized_image_data = get_or_cache_normalized_image(image_data)
+
+    if not normalized_image_data: # Check if normalization returned None
         st.error("Invalid image data after normalization.")
         return False
 
     urls_to_try = []
     
     # Priority 1: Direct CDN link (lh3.googleusercontent.com) - Best for Streamlit
-    if image_data.get('drive_direct_link'):
-        urls_to_try.append(('CDN Direct', image_data['drive_direct_link'], '#34A853'))
+    if normalized_image_data.get('drive_direct_link'):
+        urls_to_try.append(('CDN Direct', normalized_image_data['drive_direct_link'], '#34A853'))
     
     # Priority 2: High-res thumbnail - Good quality fallback
-    if image_data.get('high_res_thumbnail'):
-        urls_to_try.append(('High-Res Thumb', image_data['high_res_thumbnail'], '#FBBC04'))
+    if normalized_image_data.get('high_res_thumbnail'):
+        urls_to_try.append(('High-Res Thumb', normalized_image_data['high_res_thumbnail'], '#FBBC04'))
     
     # Priority 3: Original generation URL if available
-    if image_data.get('original_generation_url') and 'lh3.googleusercontent' not in str(image_data.get('original_generation_url', '')):
-        url_val = image_data.get('original_generation_url')
+    if normalized_image_data.get('original_generation_url') and 'lh3.googleusercontent' not in str(normalized_image_data.get('original_generation_url', '')):
+        url_val = normalized_image_data.get('original_generation_url')
         if url_val:
             urls_to_try.append(('Original Gen', url_val, '#FF6B6B'))
     
     # Priority 4: Drive public URL
-    if image_data.get('drive_public_url'):
-        urls_to_try.append(('Drive Public', image_data['drive_public_url'], '#4285F4'))
+    if normalized_image_data.get('drive_public_url'):
+        urls_to_try.append(('Drive Public', normalized_image_data['drive_public_url'], '#4285F4'))
     
     # Priority 5: Standard thumbnail
-    if image_data.get('drive_thumbnail_url'):
-        urls_to_try.append(('Thumbnail', image_data['drive_thumbnail_url'], '#FBBC04'))
+    if normalized_image_data.get('drive_thumbnail_url'):
+        urls_to_try.append(('Thumbnail', normalized_image_data['drive_thumbnail_url'], '#FBBC04'))
     
     # Priority 6: Any other URL field
-    if image_data.get('url') and image_data.get('url') not in [u[1] for u in urls_to_try]:
-        url_val = image_data.get('url')
+    if normalized_image_data.get('url') and normalized_image_data.get('url') not in [u[1] for u in urls_to_try]:
+        url_val = normalized_image_data.get('url')
         if url_val:
             urls_to_try.append(('Standard URL', url_val, '#6c757d'))
 
-    if image_data.get('webContentLink') and image_data.get('webContentLink') not in [u[1] for u in urls_to_try]:
-        url_val = image_data.get('webContentLink')
+    if normalized_image_data.get('webContentLink') and normalized_image_data.get('webContentLink') not in [u[1] for u in urls_to_try]:
+        url_val = normalized_image_data.get('webContentLink')
         if url_val:
             urls_to_try.append(('Drive Content', url_val, '#6c757d'))
     
     if not urls_to_try:
         st.error("No valid image URLs found")
-        print(f"[v0] No URLs found in image_data keys: {list(image_data.keys())}")
+        print(f"[v0] No URLs found in image_data keys: {list(normalized_image_data.keys())}")
         return False
     
     displayed = False
@@ -1048,7 +1287,7 @@ def display_image_with_fallback(image_data, caption="", use_container_width=True
             f"<div style='padding:40px;background:#fff3cd;border:2px dashed #ffc107;border-radius:12px;text-align:center;color:#856404;'>"
             f"<div style='font-size:48px;margin-bottom:10px;'>⚠️</div>"
             f"<div style='font-size:16px;font-weight:600;margin-bottom:8px;'>Image Load Failed</div>"
-            f"<div style='font-size:13px;margin-bottom:5px;'>'{image_data.get('name', 'Unknown')}'</div>"
+            f"<div style='font-size:13px;margin-bottom:5px;'>'{normalized_image_data.get('name', 'Unknown')}'</div>"
             f"<div style='font-size:11px;color:#856404;margin-bottom:10px;'>Tried {len(urls_to_try)} URL format(s)</div>"
             f"<details style='margin-top:12px;text-align:left;background:white;padding:10px;border-radius:6px;'>"
             f"<summary style='cursor:pointer;font-weight:600;font-size:12px;'>🔍 Debug Info</summary>"
@@ -1077,6 +1316,7 @@ def display_image_grid(images, columns=3, show_metadata=True, show_actions=True)
                 st.markdown("<div class='image-card' style='border:1px solid #e0e0e0;border-radius:12px;padding:12px;margin-bottom:16px;'>", unsafe_allow_html=True)
                 
                 file_name = image_data.get('name', f'Image {i+1}')
+                # Display image with fallback and source info
                 display_image_with_fallback(image_data, caption=file_name, show_source=True)
                 
                 if show_metadata:
@@ -1347,9 +1587,8 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # API Configuration
+    # API Key Input (moved to sidebar for better organization)
     st.header("API Configuration")
-    
     api_key_input = st.text_input(
         "API Key",
         type="password",
@@ -1623,7 +1862,7 @@ def save_and_upload_results(task_id, model, prompt, result_urls):
                     normalized_results.append({
                         'url': url,
                         'original_generation_url': url,
-                        'name': f"{model}_{task_id}_result", # Basic name
+                        'name': f"{model.replace('/', '_')}_{task_id}_result", # Basic name
                         'generation_source': 'ai_generated',
                         'source': 'ai_generated' # Add source for consistency
                     })
@@ -1682,10 +1921,12 @@ def save_and_upload_results(task_id, model, prompt, result_urls):
                                     'folder_name': 'Drive Storage', # Generic for uploaded files
                                     'webViewLink': drive_url
                                 })
+                                # Add to the library list (not necessarily history sub-list)
                                 st.session_state.library_images.insert(0, uploaded_image_data)
+                                st.session_state.all_library_images.insert(0, uploaded_image_data) # Also add to the main library list
                                 st.session_state.library_loaded = True # Ensure flag is set if library was empty
                             else:
-                                print(f"[v0] Upload_to_drive returned None for '{file_name}'.")
+                                print(f"[v0] upload_to_drive returned None for '{file_name}'.")
                     except Exception as e:
                         print(f"[v0] Upload failed for '{file_name}': {str(e)}")
                         continue # Continue to next image if one upload fails
@@ -1971,9 +2212,11 @@ def list_gdrive_images(folder_id=None, fetch_all=False):
 # Main Application Pages
 # ============================================================================
 def render_slideshow_page():
-    """Enhanced slideshow page with normalized image URLs and persistent selection."""
-    st.markdown('<div class="page-header"><h1>📸 Drive Slideshow Viewer</h1></div>', unsafe_allow_html=True)
-
+    """Main slideshow interface with enhanced selection persistence."""
+    st.title("🎬 Google Drive Slideshow")
+    
+    render_selection_preview_banner()
+    
     # Folder selection dropdown at top
     st.markdown("### 🗂️ Quick Load Folders")
     
@@ -2043,7 +2286,7 @@ def render_slideshow_page():
                         if not folder_id:
                             st.error("❌ Invalid folder URL. Please check and try again.")
                         else:
-                            images = get_gdrive_image_urls(folder_id) # Rely on default name extraction
+                            images = get_gdrive_image_urls(folder_url) # Rely on default name extraction
                             if images:
                                 st.session_state.images = images
                                 st.session_state.current_index = 0
@@ -2099,7 +2342,8 @@ def render_slideshow_page():
     current_item = normalize_image_urls(current_item)
     imgs[idx] = current_item  # Update in place
 
-    selected_count = len(st.session_state.get('selected_slideshow_images', []))
+    # Use unified selection count
+    selected_count = get_total_selected_count()
 
     # Stats bar
     st.markdown("""
@@ -2161,50 +2405,39 @@ def render_slideshow_page():
     # Selection controls
     st.markdown("### 🎯 Select for AI Generation")
     
-    current_id = current_item.get('id') or current_item.get('file_id') or idx
-    is_selected = any(
-        img.get('id') == current_id or img.get('file_id') == current_id 
-        for img in st.session_state.get('selected_slideshow_images', [])
-    )
+    is_selected = is_image_selected(current_item, 'slideshow')
 
     col1, col2 = st.columns([3, 2])
     with col1:
         if is_selected:
             if st.button("✓ Selected - Click to Remove", type="secondary", use_container_width=True):
-                st.session_state.selected_slideshow_images = [
-                    img for img in st.session_state.get('selected_slideshow_images', [])
-                    if (img.get('id') != current_id and img.get('file_id') != current_id)
-                ]
+                remove_from_selection(current_item, 'slideshow')
                 st.rerun()
         else:
             if st.button("➕ Add to Selection", type="primary", use_container_width=True):
-                # Ensure we don't exceed max selection limit
-                if len(st.session_state.get('selected_slideshow_images', [])) < 10:
-                    # Normalize image data before adding to session state
-                    normalized_image = normalize_image_urls(current_item.copy())
-                    if normalized_image: # Only add if normalization was successful
-                        st.session_state.selected_slideshow_images.append(normalized_image)
+                # Check against total limit across all sources
+                if get_total_selected_count() < 10:
+                    if add_to_selection(current_item, 'slideshow'):
                         st.success("✓ Image added!")
                         st.rerun()
                     else:
                         st.error("Could not add image: Invalid data.")
                 else:
-                    st.warning("⚠️ Maximum 10 images can be selected")
+                    st.warning("⚠️ Maximum 10 images can be selected across all pages")
     
     with col2:
-        st.metric("Selected", f"{len(st.session_state.get('selected_slideshow_images', []))}/10")
+        st.metric("Total Selected", f"{get_total_selected_count()}/10")
     
-    # Display selected images preview
-    if st.session_state.get('selected_slideshow_images'):
-        st.markdown("#### 📋 Selected Images")
-        selected_preview_cols = st.columns(min(6, len(st.session_state.selected_slideshow_images)))
-        for i, sel_img in enumerate(st.session_state.selected_slideshow_images[:6]):
+    slideshow_selected = st.session_state.get('selected_slideshow_images', [])
+    if slideshow_selected:
+        st.markdown("#### 📋 Selected from Slideshow")
+        selected_preview_cols = st.columns(min(6, len(slideshow_selected)))
+        for i, sel_img in enumerate(slideshow_selected[:6]):
             with selected_preview_cols[i]:
                 # Ensure images are normalized before display
-                normalized_img = normalize_image_urls(sel_img)
-                display_image_with_fallback(normalized_img, caption=f"#{i+1}", show_source=False, width=80)
-        if len(st.session_state.selected_slideshow_images) > 6:
-            st.info(f"... and {len(st.session_state.selected_slideshow_images) - 6} more")
+                display_image_with_fallback(sel_img, caption=f"#{i+1}", show_source=False, width=80)
+        if len(slideshow_selected) > 6:
+            st.info(f"... and {len(slideshow_selected) - 6} more from slideshow")
     
     # Navigation buttons for slideshow
     st.markdown("---")
@@ -2230,12 +2463,15 @@ def render_slideshow_page():
             st.session_state.autoplay = not st.session_state.autoplay
             st.rerun()
     with col4: # Corrected column assignment for the last button
-        if st.button("🗑️ Clear Selection", use_container_width=True, disabled=not st.session_state.selected_slideshow_images):
+        # Clear only slideshow selection here
+        if st.button("🗑️ Clear Slideshow Selection", use_container_width=True, disabled=not slideshow_selected):
             st.session_state.selected_slideshow_images = []
+            sync_master_selection()
             st.rerun()
     
     # Button to navigate to Generate page
-    if st.session_state.selected_slideshow_images:
+    # Use unified count for button enablement
+    if get_total_selected_count() > 0:
         if st.button("➡️ Go to Generate Page", type="primary", use_container_width=True, help="Navigate to the Generate page with your selected images"):
             st.session_state.current_page = "Generate"
             st.rerun()
@@ -2244,46 +2480,36 @@ def render_slideshow_page():
 def display_generate_page():
     st.title("🎨 Generate New Images")
     
-    # Display selected images from slideshow if any
-    if st.session_state.selected_slideshow_images:
+    render_selection_preview_banner()
+    
+    sync_master_selection()
+    all_selected = st.session_state.get('selected_images', [])
+    
+    if all_selected:
         st.markdown("""
         <div style='background:linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
                     color:white;padding:16px;border-radius:12px;margin-bottom:20px;
                     box-shadow:0 4px 6px rgba(0,0,0,0.1);'>
             <h3 style='margin:0;'>✓ {count} Images Ready for Generation</h3>
-            <p style='margin:4px 0 0 0;opacity:0.9;'>These images can be used as reference or edit sources</p>
+            <p style='margin:4px 0 0 0;opacity:0.9;font-size:14px;'>These images can be used as reference or edit sources</p>
         </div>
-        """.format(count=len(st.session_state.selected_slideshow_images)), unsafe_allow_html=True)
+        """.format(count=len(all_selected)), unsafe_allow_html=True)
         
-        with st.expander("📸 View All Selected Images", expanded=False):
-            cols = st.columns(min(5, len(st.session_state.selected_slideshow_images)))
-            for i, img in enumerate(st.session_state.selected_slideshow_images):
-                with cols[i % 5]:
-                    # Ensure images are normalized before display
-                    normalized_img = normalize_image_urls(img)
-                    display_image_with_fallback(normalized_img, caption=f"Image {i+1}", show_source=True)
-                    
-                    # Show primary URL being used for this image
-                    best_url = get_best_streamlit_url(normalized_img)
-                    if best_url:
-                        st.code(best_url[:50] + "...", language=None)
+        with st.expander("📸 View All Selected Images", expanded=True):
+            cols = st.columns(min(5, len(all_selected)))
+            for i, img in enumerate(all_selected):
+                col_idx = i % 5
+                with cols[col_idx]:
+                    display_image_with_fallback(img, caption=f"#{i+1}", show_source=False)
+                    # Show source badge
+                    source = img.get('selection_source', 'unknown')
+                    st.markdown(f"<small style='color:#888;'>From: {source}</small>", unsafe_allow_html=True)
         
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.info(f"💡 Tip: Selected images can be used in Qwen or Seedream edit modes")
-        with col2:
-            if st.button("Clear Selection"):
-                st.session_state.selected_slideshow_images = []
-                st.rerun()
-
-    # Handle image selected for editing (e.g., from Library)
-    if st.session_state.selected_image_for_edit and st.session_state.edit_mode:
-        st.info(f"Image selected for editing ({st.session_state.edit_mode}): {st.session_state.selected_image_for_edit.get('name', 'Unknown')}")
-        if st.button("Clear Image Selection for Edit"):
-            st.session_state.selected_image_for_edit = None
-            st.session_state.edit_mode = None
+        # Clear all selections button
+        if st.button("Clear All Selections"):
+            clear_all_selections()
             st.rerun()
-    
+
     # API Key check
     if not st.session_state.api_key:
         st.error("Please configure your API Key in the sidebar to start generating images.")
@@ -2344,7 +2570,6 @@ def display_generate_page():
         st.header("✏️ Image Edit - Qwen Model")
         st.info("Edit images using AI-powered Qwen model")
         
-        # Default URL if no image is selected or available
         default_qwen_url = "https://file.aiquickdraw.com/custom-page/akr/section-images/1755603225969i6j87xnw.jpg"
         selected_image_data = None
         image_url_input = default_qwen_url # Default value for input field
@@ -2385,6 +2610,7 @@ def display_generate_page():
                 use_library_image = False
                 # Only show library option if authenticated and library has images
                 if st.session_state.gdrive_authenticated and st.session_state.library_images:
+                    # Check if an image was selected for edit from library previously
                     use_library_image = st.checkbox("Use image from library", value=bool(st.session_state.selected_image_for_edit), key="qwen_lib_check")
                 
                 if use_library_image:
@@ -2555,7 +2781,10 @@ def display_generate_page():
                         display_error_with_help(result.get('error', 'Unknown error')) # Use enhanced error display
 
 def display_history_page():
+    """History page with selection capability."""
     st.title("📜 Task History")
+    
+    render_selection_preview_banner()
     
     if not st.session_state.task_history:
         st.info("No tasks yet. Create your first generation task to get started!")
@@ -2610,6 +2839,7 @@ def display_history_page():
                     except json.JSONDecodeError as e:
                         st.error(f"❌ Failed to parse task results: {str(e)}")
                         st.session_state.task_history[i]['status'] = 'fail'
+                        st.session_state.task_history[i]['error'] = f'JSON Decode Error: {str(e)}'
                         st.session_state.stats['failed_tasks'] += 1
                         st.rerun()
                 else:
@@ -2725,6 +2955,8 @@ def display_history_page():
                                                 'webViewLink': upload_info
                                             })
                                             st.session_state.library_images.insert(0, uploaded_image_data)
+                                            st.session_state.all_library_images.insert(0, uploaded_image_data) # Also add to the main library list
+                                            st.session_state.stats['uploaded_images'] += 1
                                             st.success(f"✅ Uploaded '{file_name}' to Drive!")
                                             st.rerun()
                                         else:
@@ -2784,7 +3016,7 @@ def load_complete_library():
     # Part 1: Get images from authenticated Google Drive (uploaded generations)
     if st.session_state.gdrive_authenticated and st.session_state.service and st.session_state.gdrive_folder_id:
         with st.spinner("📥 Loading images from your Google Drive storage..."):
-            drive_images = list_gdrive_images(fetch_all=True)
+            drive_images = list_gdrive_images(folder_id=st.session_state.gdrive_folder_id, fetch_all=True)
             if drive_images:
                 all_library_images.extend(drive_images)
                 st.success(f"✓ Loaded {len(drive_images)} images from your Drive storage")
@@ -2801,7 +3033,7 @@ def load_complete_library():
     unique_images = []
     for img in all_library_images:
         # Create a unique identifier for deduplication
-        img_identifier = img.get('file_id') or img.get('id') or img.get('url') or img.get('name') # Add name as fallback
+        img_identifier = get_image_id(img) # Use helper for robust ID generation
         if img_identifier and img_identifier not in seen_identifiers:
             seen_identifiers.add(img_identifier)
             # Ensure normalization for all library images
@@ -2813,9 +3045,11 @@ def load_complete_library():
     return unique_images
 
 def display_library_page():
-    """Display the library page with all images from Drive and saved folders."""
-    st.markdown('<div class="page-header"><h1>📚 Complete Image Library</h1></div>', unsafe_allow_html=True)
-
+    """Library page with enhanced selection persistence."""
+    st.title("📚 Image Library")
+    
+    render_selection_preview_banner()
+    
     # Auto-load library on first visit or when explicitly reloaded
     if not st.session_state.get('library_loaded'):
         with st.spinner("Loading complete library from all sources..."):
@@ -2935,17 +3169,16 @@ def display_library_page():
                         display_image_with_fallback(img, caption=img.get('name', 'Image'), show_source=True)
                         
                         # Selection checkbox
-                        img_id_for_key = img.get('id') or img.get('file_id') or img.get('name') or f'unknown_{i}'
-                        is_selected = img in st.session_state.get('selected_library_images', [])
+                        img_id_for_key = get_image_id(img) or f'unknown_{i}'
+                        is_selected = is_image_selected(img, 'library')
                         
                         # Use a unique key for each checkbox
-                        if st.checkbox(f"Select", key=f"lib_folder_{folder_name}_{img_id_for_key}", value=is_selected):
-                            if img not in st.session_state.selected_library_images:
-                                # Store normalized version to ensure consistency
-                                st.session_state.selected_library_images.append(normalize_image_urls(img))
+                        if st.checkbox(f"Select", key=f"lib_img_{img_id_for_key}", value=is_selected):
+                            if not is_selected:
+                                add_to_selection(img, 'library')
                         else:
-                            if img in st.session_state.selected_library_images:
-                                st.session_state.selected_library_images.remove(img)
+                            if is_selected:
+                                remove_from_selection(img, 'library')
 
     elif view_mode == "List":
         # List view with detailed URLs
@@ -3027,35 +3260,41 @@ def display_library_page():
         display_image_grid(filtered_images, columns=4, show_metadata=True, show_actions=True)
     
     # Action bar for selected library images
-    if st.session_state.selected_library_images:
+    # Use new selection management functions and show library-specific actions
+    library_selected = st.session_state.get('selected_library_images', [])
+    if library_selected:
         st.markdown("---")
         st.markdown("### Selected Library Images")
-        sel_preview_cols = st.columns(min(6, len(st.session_state.selected_library_images)))
-        for i, sel_img in enumerate(st.session_state.selected_library_images[:6]):
+        sel_preview_cols = st.columns(min(6, len(library_selected)))
+        for i, sel_img in enumerate(library_selected[:6]):
             with sel_preview_cols[i]:
-                normalized_sel_img = normalize_image_urls(sel_img)
-                display_image_with_fallback(normalized_sel_img, caption=f"#{i+1}", show_source=False, width=80)
-        if len(st.session_state.selected_library_images) > 6:
-            st.info(f"... and {len(st.session_state.selected_library_images) - 6} more")
+                # Use cached normalized image
+                normalized_sel_img = get_or_cache_normalized_image(sel_img)
+                if normalized_sel_img:
+                    display_image_with_fallback(normalized_sel_img, caption=f"#{i+1}", show_source=False, width=80)
+        if len(library_selected) > 6:
+            st.info(f"... and {len(library_selected) - 6} more selected from library")
 
-        act_col1, act_col2, act_col3 = st.columns([1,1,4])
+        act_col1, act_col2, act_col3 = st.columns(3)
         with act_col1:
             if st.button("Qwen Edit Selected", use_container_width=True):
-                if st.session_state.selected_library_images:
-                    st.session_state.selected_image_for_edit = st.session_state.selected_library_images[0] # Take the first selected
+                if library_selected:
+                    # Take the first selected image for editing
+                    st.session_state.selected_image_for_edit = library_selected[0] 
                     st.session_state.edit_mode = 'qwen'
                     st.session_state.current_page = "Generate"
                     st.rerun()
         with act_col2:
             if st.button("Seedream Selected", use_container_width=True):
-                if st.session_state.selected_library_images:
-                    st.session_state.selected_image_for_edit = st.session_state.selected_library_images[0] # Take the first selected
+                if library_selected:
+                    st.session_state.selected_image_for_edit = library_selected[0] # Take the first selected
                     st.session_state.edit_mode = 'seedream'
                     st.session_state.current_page = "Generate"
                     st.rerun()
         with act_col3:
             if st.button("Clear Library Selection", use_container_width=True):
                 st.session_state.selected_library_images = []
+                sync_master_selection()
                 st.rerun()
 
     st.markdown("---")
