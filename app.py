@@ -1241,6 +1241,397 @@ with st.sidebar:
     st.metric("Success Rate", f"{success_rate:.1f}%")
 
 # ============================================================================
+# API Functions - Task Creation and Management
+# ============================================================================
+
+def create_task(api_key, model, input_params, callback_url=None):
+    """Create a generation task with retry logic and fallback endpoints."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": model,
+        "input": input_params
+    }
+    
+    if callback_url:
+        payload["callBackUrl"] = callback_url
+    
+    # Try primary endpoint with retries
+    for attempt in range(MAX_RETRIES):
+        try:
+            print(f"[v0] Attempt {attempt + 1}/{MAX_RETRIES}: Creating task with {API_BASE_URL}")
+            response = requests.post(
+                f"{API_BASE_URL}/createTask",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            data = response.json()
+            if response.status_code == 200:
+                if data.get("code") == 200:
+                    st.session_state.stats['total_tasks'] += 1
+                    print(f"[v0] ✓ Task created successfully: {data['data']['taskId']}")
+                    return {"success": True, "task_id": data["data"]["taskId"]}
+                else:
+                    error_msg = data.get('msg', 'Unknown API error')
+                    print(f"[v0] ✗ API returned error: {error_msg}")
+                    return {"success": False, "error": error_msg}
+            else:
+                print(f"[v0] ✗ HTTP error: {response.status_code}")
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                    print(f"[v0] Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    continue
+                return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
+                
+        except requests.exceptions.RequestException as e:
+            print(f"[v0] ✗ Network error: {str(e)}")
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_DELAY * (RETRY_BACKOFF ** attempt)
+                print(f"[v0] Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            
+            # Try fallback endpoint on final attempt
+            print(f"[v0] Trying fallback endpoint: {API_FALLBACK_URL}")
+            try:
+                response = requests.post(
+                    f"{API_FALLBACK_URL}/createTask",
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                )
+                data = response.json()
+                if response.status_code == 200 and data.get("code") == 200:
+                    st.session_state.stats['total_tasks'] += 1
+                    return {"success": True, "task_id": data["data"]["taskId"]}
+            except Exception as fallback_error:
+                print(f"[v0] ✗ Fallback also failed: {str(fallback_error)}")
+            
+            return {"success": False, "error": f"Network error: {str(e)}"}
+            
+        except json.JSONDecodeError:
+            return {"success": False, "error": "Invalid JSON response from API"}
+        except Exception as e:
+            return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
+    
+    return {"success": False, "error": "Max retries exceeded"}
+
+
+def check_task_status(api_key, task_id):
+    """Check task status with the API."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+    
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/recordInfo",
+            headers=headers,
+            params={"taskId": task_id},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("code") == 200:
+                return {"success": True, "data": data["data"]}
+            else:
+                return {"success": False, "error": data.get('msg', 'Unknown API error')}
+        else:
+            return {"success": False, "error": f"HTTP {response.status_code}: {response.text}"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"Network error: {str(e)}"}
+    except json.JSONDecodeError:
+        return {"success": False, "error": "Invalid JSON response from API"}
+    except Exception as e:
+        return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
+
+
+def poll_task_until_complete(api_key, task_id, max_attempts=60, delay=2):
+    """Poll task status until completion or timeout."""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for attempt in range(max_attempts):
+        result = check_task_status(api_key, task_id)
+        
+        if result["success"]:
+            task_data = result["data"]
+            state = task_data["state"]
+            
+            # Calculate progress based on attempt number, capped at 95% until success
+            progress_val = min((attempt + 1) / max_attempts, 0.95)
+            progress_bar.progress(progress_val)
+            status_text.text(f"Status: {state.upper()} | Attempt {attempt + 1}/{max_attempts}")
+            
+            if state == "success":
+                progress_bar.progress(1.0)
+                status_text.text("✅ Task completed successfully!")
+                return {"success": True, "data": task_data}
+            elif state == "fail":
+                progress_bar.empty()
+                status_text.text("❌ Task failed")
+                return {"success": False, "error": task_data.get('failMsg', 'Unknown failure reason'), "data": task_data}
+            
+            time.sleep(delay)
+        else:
+            # Display error message if status check fails
+            status_text.text(f"⚠️ Error checking status: {result.get('error', 'Unknown error')}")
+            time.sleep(delay)
+    
+    # Timeout reached if loop completes without success or failure
+    progress_bar.empty()
+    status_text.text("⏱️ Polling timed out")
+    return {"success": False, "error": "Timeout reached while waiting for task completion"}
+
+
+def save_and_upload_results(task_id, model, prompt, result_urls):
+    """Save results to history and auto-upload to Google Drive if enabled."""
+    updated = False
+    for i, task in enumerate(st.session_state.task_history):
+        if task['id'] == task_id:
+            st.session_state.task_history[i]['status'] = 'success'
+            st.session_state.task_history[i]['results'] = result_urls
+            st.session_state.stats['successful_tasks'] += 1
+            st.session_state.stats['total_images'] += len(result_urls)
+            updated = True
+            
+            # Auto-upload to Google Drive if authenticated and enabled
+            if st.session_state.authenticated and st.session_state.auto_upload:
+                for j, result_url in enumerate(result_urls):
+                    # Infer file extension if possible
+                    file_extension = 'png'  # default
+                    if '.jpg' in result_url.lower() or '.jpeg' in result_url.lower():
+                        file_extension = 'jpg'
+                    elif '.webp' in result_url.lower():
+                        file_extension = 'webp'
+                    
+                    file_name = f"{model.replace('/', '_')}_{task_id}_{j+1}.{file_extension}"
+                    
+                    try:
+                        with st.spinner(f"Uploading {file_name} to Drive..."):
+                            drive_url = upload_to_drive(result_url, file_name)
+                            if drive_url:
+                                st.success(f"Uploaded {file_name} to Google Drive")
+                                # Add Drive URL to task history
+                                if 'drive_urls' not in st.session_state.task_history[i]:
+                                    st.session_state.task_history[i]['drive_urls'] = []
+                                st.session_state.task_history[i]['drive_urls'].append(drive_url)
+                    except Exception as e:
+                        st.warning(f"Could not upload {file_name}: {str(e)}")
+            
+            break
+    
+    return updated
+
+# ============================================================================
+# Google Drive Authentication and Upload Functions
+# ============================================================================
+
+def authenticate_with_service_account(service_account_json: dict):
+    """Authenticate with Google Drive using service account credentials."""
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_json, scopes=SCOPES
+        )
+        service = build("drive", "v3", credentials=credentials)
+        
+        # Test connection by trying to list files in the app's folder (or root if not found)
+        try:
+            app_folder_id = create_app_folder() # This will create if it doesn't exist
+            service.files().list(q=f"'{app_folder_id}' in parents", pageSize=1, fields="nextPageToken, files(id, name)").execute()
+        except Exception as test_e:
+            print(f"[v0] Drive authentication test failed: {str(test_e)}")
+            return False, "Authentication successful, but could not access Drive. Check folder permissions."
+
+        st.session_state.credentials = credentials
+        st.session_state.service = service
+        st.session_state.authenticated = True
+        return True, "Successfully authenticated with Google Drive."
+        
+    except Exception as e:
+        print(f"[v0] Service account authentication failed: {str(e)}")
+        return False, f"Authentication failed: {str(e)}"
+
+def create_app_folder():
+    """Creates a folder for the app in Google Drive if it doesn't exist."""
+    if not st.session_state.service:
+        return None
+    
+    folder_name = "AI_Slideshow_Generator"
+    
+    try:
+        # Check if folder already exists
+        query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        response = st.session_state.service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
+        
+        if response.get("files"):
+            folder_id = response["files"][0]["id"]
+            print(f"[v0] App folder '{folder_name}' already exists with ID: {folder_id}")
+        else:
+            # Create folder if it doesn't exist
+            file_metadata = {
+                "name": folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+            }
+            folder = st.session_state.service.files().create(body=file_metadata, fields="id").execute()
+            folder_id = folder.get("id")
+            print(f"[v0] Created app folder '{folder_name}' with ID: {folder_id}")
+            
+            # Make the folder publicly accessible (optional, but good for collaboration if needed)
+            try:
+                st.session_state.service.permissions().create(
+                    fileId=folder_id,
+                    body={'type': 'anyone', 'role': 'reader'},
+                    fields='id'
+                ).execute()
+                print(f"[v0] Made folder '{folder_name}' public.")
+            except Exception as perm_e:
+                print(f"[v0] Failed to make folder public: {str(perm_e)}")
+
+        st.session_state.gdrive_folder_id = folder_id
+        return folder_id
+        
+    except Exception as e:
+        print(f"[v0] Error creating/finding app folder: {str(e)}")
+        return None
+
+def upload_to_drive(file_path_or_url, filename, parent_folder_id=None):
+    """Upload a file to Google Drive from a URL or local path."""
+    if not st.session_state.service:
+        st.error("Not authenticated with Google Drive.")
+        return None
+    
+    if parent_folder_id is None:
+        parent_folder_id = st.session_state.gdrive_folder_id
+    
+    if not parent_folder_id:
+        st.error("Google Drive folder not set up. Please authenticate.")
+        return None
+    
+    print(f"[v0] Uploading '{filename}' to Drive folder '{parent_folder_id}'...")
+    
+    try:
+        # Download the file if it's a URL
+        if file_path_or_url.startswith("http"):
+            response = requests.get(file_path_or_url, stream=True, timeout=60)
+            response.raise_for_status()
+            file_content = io.BytesIO(response.content)
+            mime_type = response.headers.get('content-type', 'image/png').split(';')[0]
+        else:
+            with open(file_path_or_url, "rb") as f:
+                file_content = io.BytesIO(f.read())
+            # Infer mime type from filename
+            if filename.lower().endswith(".png"):
+                mime_type = "image/png"
+            elif filename.lower().endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            elif filename.lower().endswith(".webp"):
+                mime_type = "image/webp"
+            else:
+                mime_type = "application/octet-stream" # Default fallback
+
+        file_metadata = {
+            "name": filename,
+            "parents": [parent_folder_id]
+        }
+        
+        media = MediaIoBaseUpload(file_content, mimetype=mime_type, resumable=True)
+        
+        file = st.session_state.service.files().create(
+            body=file_metadata, media_body=media, fields="id, webViewLink"
+        ).execute()
+        
+        print(f"[v0] Successfully uploaded '{filename}'. File ID: {file.get('id')}")
+        
+        # Optionally, make the uploaded file public for easier sharing
+        try:
+            st.session_state.service.permissions().create(
+                fileId=file.get("id"),
+                body={'type': 'anyone', 'role': 'reader'},
+                fields='id'
+            ).execute()
+            print(f"[v0] Made uploaded file '{filename}' public.")
+        except Exception as perm_e:
+            print(f"[v0] Failed to make uploaded file public: {str(perm_e)}")
+            
+        st.session_state.stats['uploaded_images'] += 1
+        return file.get("webViewLink")
+        
+    except requests.exceptions.Timeout:
+        st.error("Timeout downloading image for upload.")
+        return None
+    except Exception as e:
+        print(f"[v0] Error uploading file: {str(e)}")
+        st.error(f"Error uploading '{filename}' to Google Drive: {str(e)}")
+        return None
+
+def list_gdrive_images(folder_id=None, fetch_all=False):
+    """List images from a specific folder or the entire Drive if fetch_all=True."""
+    if not st.session_state.service:
+        return []
+
+    if folder_id is None:
+        folder_id = st.session_state.gdrive_folder_id
+    
+    if not folder_id:
+        return []
+
+    images = []
+    try:
+        query = f"'{folder_id}' in parents and mimeType contains 'image/' and trashed=false"
+        if not fetch_all:
+            query += " and name contains 'AI_Slideshow_Generator_'" # Filter specifically generated images if not fetching all
+
+        page_token = None
+        while True:
+            response = st.session_state.service.files().list(
+                q=query,
+                spaces="drive",
+                fields="nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, webViewLink, thumbnailLink, webContentLink)",
+                pageToken=page_token
+            ).execute()
+            
+            for file in response.get("files", []):
+                image_data = {
+                    "id": file["id"],
+                    "file_id": file["id"], # Alias for consistency
+                    "name": file.get("name", "Unknown"),
+                    "mimeType": file.get("mimeType", ""),
+                    "size": file.get("size", 0),
+                    "createdTime": file.get("createdTime", ""),
+                    "modifiedTime": file.get("modifiedTime", ""),
+                    "webViewLink": file.get("webViewLink", ""),
+                    "thumbnailLink": file.get("thumbnailLink", ""),
+                    "webContentLink": file.get("webContentLink", ""),
+                    "source": "gdrive_storage",
+                    "folder_id": folder_id, # Store the folder_id for reference
+                    "url": file.get("webContentLink", ""), # Use webContentLink as primary
+                    "original_url": file.get("webContentLink", ""),
+                    "original_generation_url": file.get("webContentLink", ""), # For consistency with generation results
+                }
+                # Normalize the image data for display and compatibility
+                image_data = normalize_image_urls(image_data)
+                images.append(image_data)
+            
+            page_token = response.get("nextPageToken", None)
+            if page_token is None:
+                break
+                
+        print(f"[v0] Listed {len(images)} images from Drive folder '{folder_id}'")
+        return images
+        
+    except Exception as e:
+        print(f"[v0] Error listing Drive files: {str(e)}")
+        return []
+
+# ============================================================================
 # Main Application Pages
 # ============================================================================
 
@@ -1963,6 +2354,42 @@ def display_history_page():
             
         st.markdown("</div>", unsafe_allow_html=True)
 
+def display_error_with_help(error_message):
+    """Display error with helpful troubleshooting information."""
+    st.error(f"❌ Error: {error_message}")
+    
+    with st.expander("🔧 Troubleshooting Tips"):
+        st.markdown(f"""
+        **Common Issues and Solutions:**
+        
+        1. **Network/Connection Errors:**
+           - Check your internet connection
+           - Try again in a few moments
+           - The API service may be temporarily unavailable
+        
+        2. **API Key Issues:**
+           - Verify your API key is correct in the sidebar
+           - Check if your API key has expired
+           - Ensure your API account has sufficient credits
+        
+        3. **Timeout Errors:**
+           - The server may be under heavy load
+           - Try with a smaller image or simpler prompt
+           - Wait a few minutes and try again
+        
+        4. **DNS/Resolution Errors:**
+           - The API endpoint may be temporarily unreachable
+           - Your network may be blocking the API domain
+           - Try using a different network connection
+        
+        **Current Configuration:**
+        - Primary Endpoint: `{API_BASE_URL}`
+        - Fallback Endpoint: `{API_FALLBACK_URL}`
+        - Retry Attempts: {MAX_RETRIES}
+        - Timeout: 30 seconds
+        """)
+
+
 def list_all_drive_folders_images():
     """Fetch images from all saved folders (public folders via scraping)."""
     all_images = []
@@ -2191,41 +2618,6 @@ def display_library_page():
     with stat_col4:
         avg_size = total_size_mb / len(filtered_images) if filtered_images else 0
         st.metric("Avg Size", f"{avg_size:.2f} MB")
-
-def display_error_with_help(error_message):
-    """Display error with helpful troubleshooting information."""
-    st.error(f"❌ Error: {error_message}")
-    
-    with st.expander("🔧 Troubleshooting Tips"):
-        st.markdown(f"""
-        **Common Issues and Solutions:**
-        
-        1. **Network/Connection Errors:**
-           - Check your internet connection
-           - Try again in a few moments
-           - The API service may be temporarily unavailable
-        
-        2. **API Key Issues:**
-           - Verify your API key is correct in the sidebar
-           - Check if your API key has expired
-           - Ensure your API account has sufficient credits
-        
-        3. **Timeout Errors:**
-           - The server may be under heavy load
-           - Try with a smaller image or simpler prompt
-           - Wait a few minutes and try again
-        
-        4. **DNS/Resolution Errors:**
-           - The API endpoint may be temporarily unreachable
-           - Your network may be blocking the API domain
-           - Try using a different network connection
-        
-        **Current Configuration:**
-        - Primary Endpoint: `{API_BASE_URL}`
-        - Fallback Endpoint: `{API_FALLBACK_URL}`
-        - Retry Attempts: {MAX_RETRIES}
-        - Timeout: 30 seconds
-        """)
 
 # ============================================================================
 # Main Page Router
