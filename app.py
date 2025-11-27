@@ -348,6 +348,37 @@ def init_session_state():
 init_session_state()
 
 # ============================================================================
+# Utility Functions
+# ============================================================================
+
+def extract_folder_id(url: str):
+    """Extract folder ID from various Google Drive URL formats"""
+    patterns = [
+        r'/folders/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'^([a-zA-Z0-9_-]+)$'
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    raise ValueError("Invalid Google Drive folder link.")
+
+def extract_file_id(url: str):
+    """Extract file ID from Google Drive URL"""
+    patterns = [
+        r'/d/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'^([a-zA-Z0-9_-]+)$'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+# ============================================================================
 # Drive Functions - Public Folder Access (No Auth Required)
 # ============================================================================
 
