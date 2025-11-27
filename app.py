@@ -2552,15 +2552,11 @@ def display_error_with_help(error_message):
 # ============================================================================
 # Main Page Router
 # ============================================================================
-# </CHANGE> Fixed duplicate lines causing syntax error
 if st.session_state.current_page == "Slideshow":
     render_slideshow_page()
 elif st.session_state.current_page == "Generate":
     display_generate_page()
 elif st.session_state.current_page == "History":
     display_history_page()
-elif st.session_state.current_page == "Library":
-    display_library_page()
-()
 elif st.session_state.current_page == "Library":
     display_library_page()
