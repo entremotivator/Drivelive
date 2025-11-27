@@ -1134,7 +1134,7 @@ def get_gdrive_image_urls(folder_id: str, folder_name: str = None):
                     images.append(normalize_image_urls(image_data))
             
             # Method 2: 28-character file IDs (less common for images, but include)
-            if len(images) < 50: # Avoid excessive searching if we already have many
+            if len(images) < 50: # Avoids excessive searching if we already have many
                 alt_file_ids = re.findall(r'"([a-zA-Z0-9_-]{28})"', html_content)
                 print(f"[v0] Found {len(alt_file_ids)} additional file IDs (28 chars)")
                 for file_id in alt_file_ids:
@@ -2672,9 +2672,9 @@ def display_generate_page():
                     image_url_input = st.text_input("Image URL", value=image_url_input, key="qwen_url_input")
                     st.caption("⚠️ Make sure the URL is publicly accessible")
             
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
-                image_size = st.selectbox("Image Size", ["1024x1024", "512x512", "768x768"], key="qwen_size")
+                image_size = st.selectbox("Image Size", ["square", "square_hd", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"], index=1, key="qwen_size")
                 num_steps = st.slider("Inference Steps", 1, 50, 20, key="qwen_steps")
             with col2:
                 guidance_scale = st.slider("Guidance Scale", 0.0, 20.0, 4.0)
@@ -2778,9 +2778,9 @@ def display_generate_page():
             
             col1, col2 = st.columns(2)
             with col1:
-                image_size = st.selectbox("Image Size", ["1024x1024", "512x512", "768x768"], key="seedream_size")
+                image_size = st.selectbox("Image Size", ["square", "square_hd", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"], index=1, key="seedream_size")
             with col2:
-                image_resolution = st.selectbox("Resolution", ["1024x1024", "2048x2048"], key="seedream_res")
+                image_resolution = st.selectbox("Resolution", ["1024", "2048"], key="seedream_res")
             
             submitted = st.form_submit_button("Edit Image (Seedream)")
             
